@@ -5,3 +5,4 @@ node_modules/
 .usage/
 .cron/
 super-agent.config.json
+.traces/
