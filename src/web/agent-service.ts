@@ -15,6 +15,7 @@ import { ToolRegistry } from "../tools/registry.js";
 import { TutorOrchestrator } from "../tutor/orchestrator.js";
 import type { TutorEvent, VisibleReasoningTrace } from "../tutor/types.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
+import { AiTutorModelClient } from "../tutor/model-client.js";
 
 export interface WebAgentRunInput {
   conversationId: string;
@@ -90,12 +91,13 @@ export class WebAgentService {
   private readonly model: any;
   private readonly promptBuilder: PromptBuilder;
   private readonly sessions = new Map<string, ModelMessage[]>();
-  private readonly tutor = new TutorOrchestrator();
+  private readonly tutor: TutorOrchestrator;
   private runQueue: Promise<unknown> = Promise.resolve();
 
   constructor() {
     const config = loadConfig();
     this.model = createModel(config.model);
+    this.tutor = new TutorOrchestrator(undefined, new AiTutorModelClient(this.model));
     this.promptBuilder = new PromptBuilder()
       .pipe(
         "webRules",

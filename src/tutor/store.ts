@@ -21,7 +21,7 @@ export class TutorStore {
     try {
       const raw = await readFile(this.statePath(conversationId), "utf8");
       const state = JSON.parse(raw) as TutorState;
-      if (![1, 2].includes(state.schemaVersion) || state.conversationId !== conversationId) {
+      if (![1, 2, 3].includes(state.schemaVersion) || state.conversationId !== conversationId) {
         throw new Error("学习状态版本或会话不匹配");
       }
       return state;

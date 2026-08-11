@@ -6,6 +6,16 @@ export type TutorPhase =
   | "teach"
   | "complete";
 
+export type TutorTurnIntent =
+  | "answer"
+  | "dont_know"
+  | "disagreement"
+  | "clarification"
+  | "direct_answer_request"
+  | "topic_switch"
+  | "meta_question"
+  | "stop";
+
 export type TopicRubricAnchor = {
   conceptId: string;
   accuracy: string;
@@ -33,6 +43,37 @@ export type TopicModel = {
   rubricAnchors: TopicRubricAnchor[];
   evidenceSources: string[];
   confidence: number;
+};
+
+export type TutorTurnDecision = {
+  intent: TutorTurnIntent;
+  understoodMeaning: string;
+  evidence: Array<{ quote: string; implication: string }>;
+  assessment: {
+    status: "not-answered" | "insufficient" | "partial" | "misconception" | "mastered";
+    score?: number;
+    rubricEvidence: string[];
+  };
+  nextAction:
+    | "explain"
+    | "give-example"
+    | "ask-clarification"
+    | "repair-misconception"
+    | "ask-socratic-question"
+    | "give-practice"
+    | "advance-concept"
+    | "switch-topic"
+    | "complete";
+  statePatch: {
+    activeConceptId?: string;
+    addMisconception?: string;
+    masteredConceptId?: string;
+  };
+  responsePlan: {
+    goal: string;
+    keyPoints: string[];
+    question?: string;
+  };
 };
 
 export type UniversalTutorProfile = {
@@ -89,7 +130,7 @@ export type VisibleReasoningTrace = {
 };
 
 export type TutorState = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   conversationId: string;
   phase: TutorPhase;
   topic?: string;
@@ -104,6 +145,7 @@ export type TutorState = {
   turnCount: number;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   updatedAt: string;
+  lastDecision?: TutorTurnDecision;
 };
 
 export type TutorEvent =
