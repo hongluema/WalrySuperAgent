@@ -18,6 +18,7 @@ import type { TutorEvent } from "../tutor/types.js";
 export interface WebAgentRunInput {
   conversationId: string;
   message: string;
+  diagnosticAnswers?: Record<string, string>;
 }
 
 export interface WebAgentRunResult {
@@ -104,6 +105,7 @@ export class WebAgentService {
         input.message,
         (event) => onEvent?.(event),
         signal,
+        { diagnosticAnswers: input.diagnosticAnswers },
       );
       return {
         runId: `run_${Date.now().toString(36)}`,

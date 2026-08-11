@@ -6,6 +6,46 @@ export type TutorPhase =
   | "teach"
   | "complete";
 
+export type TopicRubricAnchor = {
+  conceptId: string;
+  accuracy: string;
+  transfer: string;
+};
+
+export type TopicModel = {
+  id: string;
+  topic: string;
+  lessonTitle: string;
+  coreOutcome: string;
+  diagnosticDimensions: Array<{
+    id: string;
+    tab: string;
+    question: string;
+    options: DiagnosticOption[];
+  }>;
+  conceptRoute: Array<{
+    id: string;
+    title: string;
+    target: string;
+  }>;
+  boundaryCases: string[];
+  practiceTarget: string;
+  rubricAnchors: TopicRubricAnchor[];
+  evidenceSources: string[];
+  confidence: number;
+};
+
+export type UniversalTutorProfile = {
+  id: "universal-mastery-tutor";
+  version: string;
+  diagnosticCardMin: 3;
+  diagnosticCardMax: 6;
+  evidenceLayers: string[];
+  masteryThreshold: number;
+  masteryCheckThreshold: number;
+  questionPolicy: string;
+};
+
 export type DiagnosticOption = {
   id: string;
   label: string;
@@ -49,11 +89,13 @@ export type VisibleReasoningTrace = {
 };
 
 export type TutorState = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   conversationId: string;
   phase: TutorPhase;
   topic?: string;
   lessonTitle?: string;
+  topicModel?: TopicModel;
+  universalProfileVersion?: string;
   diagnosticCards: DiagnosticCard[];
   diagnosticAnswers: Record<string, string>;
   currentCard: number;
@@ -68,7 +110,8 @@ export type TutorEvent =
   | { type: "run.started"; runId: string; conversationId: string }
   | { type: "tutor.phase.changed"; phase: TutorPhase; label: string }
   | { type: "research.completed"; sourceCount: number; researchedAt: string }
-  | { type: "lesson.model.ready"; title: string; outcome: string }
+  | { type: "topic.model.ready"; title: string; outcome: string; topic: string }
+  | { type: "diagnostic.cards.ready"; cards: DiagnosticCard[] }
   | { type: "diagnostic.card.ready"; card: DiagnosticCard }
   | { type: "diagnosis.ready"; diagnosis: string; background: string[] }
   | { type: "roadmap.ready"; roadmap: RoadmapNode[] }

@@ -8,6 +8,7 @@ import { WebAgentService } from "./agent-service.js";
 const runSchema = z.object({
   conversationId: z.string().trim().min(1).max(120),
   message: z.string().trim().min(1).max(20_000),
+  diagnosticAnswers: z.record(z.string()).optional(),
 });
 
 export const app = new Hono();
