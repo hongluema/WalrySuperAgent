@@ -31,6 +31,12 @@ test("runs the diagnostic journey and persists resumable state", async () => {
     );
     assert.ok(events.some((event) => event.type === "research.completed"));
     assert.ok(events.some((event) => event.type === "message.delta"));
+    const latestTrace = [...events].reverse().find((event) => event.type === "reasoning.trace.ready");
+    assert.equal(latestTrace?.type, "reasoning.trace.ready");
+    if (latestTrace?.type === "reasoning.trace.ready") {
+      assert.equal(latestTrace.trace.phase, "diagnose");
+      assert.match(latestTrace.trace.selectedAction, /诊断卡/);
+    }
 
     events.length = 0;
     await tutor.run("test-session", "完成诊断", emit, undefined, {

@@ -55,6 +55,22 @@ function makeTrace(state: TutorState, model: TopicModel, evidence: string[], act
   };
 }
 
+function makeStageTrace(
+  state: TutorState,
+  model: TopicModel,
+  phase: TutorState["phase"],
+  goal: string,
+  evidence: string[],
+  action: string,
+  reason: string,
+): VisibleReasoningTrace {
+  return {
+    ...makeTrace(state, model, evidence, action, reason),
+    phase,
+    currentGoal: goal,
+  };
+}
+
 export class TutorOrchestrator {
   constructor(private readonly store = new TutorStore()) {}
 
@@ -132,6 +148,18 @@ export class TutorOrchestrator {
       if (isDirectHelpRequest(message)) {
         state.phase = "teach";
         await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
+        await emit({
+          type: "reasoning.trace.ready",
+          trace: makeStageTrace(
+            state,
+            topicModel,
+            "teach",
+            `直接回答“${topicModel.lessonTitle}”的核心问题`,
+            ["用户明确要求直接讲解", `主题模型已识别为：${topicModel.lessonTitle}`],
+            "直接讲解主题核心结论",
+            "用户没有要求先摸底，因此不强制进入诊断流程",
+          ),
+        });
         await sendText(`关于“${topicModel.lessonTitle}”，先给你一个直接结论：${topicModel.coreOutcome}\n\n接下来可以用一个真实的小任务验证是否真正掌握：${topicModel.practiceTarget}。如果你愿意系统学习，我会先根据你的实际经验进行摸底，再从最早的缺口开始。`);
         await this.persist(state, runId, emit);
         await emit({ type: "run.completed", runId });
@@ -146,8 +174,32 @@ export class TutorOrchestrator {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });
         await emit({ type: "research.completed", sourceCount: topicModel.evidenceSources.length, researchedAt: new Date().toISOString() });
         await emit({ type: "topic.model.ready", title: topicModel.lessonTitle, outcome: topicModel.coreOutcome, topic: topicModel.topic });
+        await emit({
+          type: "reasoning.trace.ready",
+          trace: makeStageTrace(
+            state,
+            topicModel,
+            "research",
+            `为“${topicModel.lessonTitle}”建立通用主题模型`,
+            ["用户提出系统学习请求", `已识别主题：${topicModel.topic}`, `已建立 ${topicModel.conceptRoute.length} 个概念节点`],
+            "建立 TopicModel 并准备诊断",
+            "所有主题沿用同一套建模、诊断、练习和掌握判断流程",
+          ),
+        });
         state.phase = "diagnose";
         await emit({ type: "tutor.phase.changed", phase: "diagnose", label: phaseLabels.diagnose });
+        await emit({
+          type: "reasoning.trace.ready",
+          trace: makeStageTrace(
+            state,
+            topicModel,
+            "diagnose",
+            `定位“${topicModel.lessonTitle}”中最早的学习缺口`,
+            ["诊断卡已根据当前主题动态生成", `共 ${state.diagnosticCards.length} 张卡片`, "答案将在全部提交后统一评价"],
+            "展示诊断卡并收集证据",
+            "先收集可观察的经验、理解和迁移证据，再决定学习起点",
+          ),
+        });
         await sendText(`我是你的通用私教。这一节我们学习【${topicModel.lessonTitle}】。\n\n开始前先摸一下你的当前情况，${state.diagnosticCards.length} 个问题，全部完成后统一开始。`);
         await emit({ type: "diagnostic.cards.ready", cards: state.diagnosticCards });
         await emit({ type: "diagnostic.card.ready", card: state.diagnosticCards[0] });
@@ -168,6 +220,18 @@ export class TutorOrchestrator {
             state.diagnosticAnswers[card.id] = answer;
             if (state.currentCard < state.diagnosticCards.length - 1) {
               state.currentCard += 1;
+              await emit({
+                type: "reasoning.trace.ready",
+                trace: makeStageTrace(
+                  state,
+                  topicModel,
+                  "diagnose",
+                  `继续定位“${topicModel.lessonTitle}”的学习起点`,
+                  [`已收到“${card.tab}”的回答`, `已完成 ${Object.keys(state.diagnosticAnswers).length}/${state.diagnosticCards.length} 张诊断卡`],
+                  "切换到下一张诊断卡",
+                  "诊断阶段只收集证据，不提前改变学习路线",
+                ),
+              });
               await emit({ type: "diagnostic.card.ready", card: state.diagnosticCards[state.currentCard] });
               await this.persist(state, runId, emit);
               await emit({ type: "run.completed", runId });

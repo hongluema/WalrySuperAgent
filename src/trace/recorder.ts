@@ -118,6 +118,15 @@ export class LocalTraceRecorder {
     });
   }
 
+  async recordEvent(event: unknown): Promise<void> {
+    await this.write({
+      type: 'semantic_event',
+      traceId: this.traceId,
+      timestamp: new Date().toISOString(),
+      event: sanitize(event),
+    });
+  }
+
   private async write(event: Record<string, unknown>): Promise<void> {
     if (this.writeFailed) return;
     try {
