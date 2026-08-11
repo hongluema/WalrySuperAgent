@@ -17,10 +17,6 @@ app.get("/health", (context) =>
   context.json({ status: "ok", service: "walry-web-agent" }),
 );
 
-/**
- * 首版先提供非流式 JSON 接口，验证 Cheerful → Walry → 模型 → Cheerful
- * 的完整闭环。流式 AgentEvent 会在下一阶段复用同一个 Facade 加入。
- */
 app.post("/api/v1/runs", async (context) => {
   let body: unknown;
   try {
@@ -40,17 +36,32 @@ app.post("/api/v1/runs", async (context) => {
     );
   }
 
-  try {
-    const result = await agent.run(parsed.data);
-    return context.json(result, 200);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Agent 运行失败";
-    console.error(`[web-agent] ${message}`);
-    return context.json(
-      { error: { code: "AGENT_RUN_FAILED", message } },
-      500,
-    );
-  }
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (event: unknown) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
+
+      void agent
+        .run(parsed.data, context.req.raw.signal, send)
+        .then(() => controller.close())
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : "Agent 运行失败";
+          console.error(`[web-agent] ${message}`);
+          send({ type: "error", message });
+          controller.close();
+        });
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "cache-control": "no-cache, no-transform",
+      "content-type": "text/event-stream; charset=utf-8",
+      connection: "keep-alive",
+    },
+  });
 });
 
 function isMainModule(): boolean {

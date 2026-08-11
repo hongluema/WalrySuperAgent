@@ -2,7 +2,7 @@ import "dotenv/config";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ModelMessage } from "ai";
 import { createMockModel } from "../mock-model.js";
-import { agentLoop } from "../agent/loop.js";
+import { agentLoop, type AgentLoopEvent } from "../agent/loop.js";
 import {
   PromptBuilder,
   sessionContext,
@@ -76,8 +76,12 @@ export class WebAgentService {
    * 串行化首版运行，避免当前 loop-detection 模块级历史在并发请求间串扰。
    * 后续将循环检测改为 Run Context 后，再开放并发执行。
    */
-  run(input: WebAgentRunInput, signal?: AbortSignal): Promise<WebAgentRunResult> {
-    const task = this.runQueue.then(() => this.runInternal(input, signal));
+  run(
+    input: WebAgentRunInput,
+    signal?: AbortSignal,
+    onEvent?: (event: AgentLoopEvent) => void | Promise<void>,
+  ): Promise<WebAgentRunResult> {
+    const task = this.runQueue.then(() => this.runInternal(input, signal, onEvent));
     this.runQueue = task.then(
       () => undefined,
       () => undefined,
@@ -88,6 +92,7 @@ export class WebAgentService {
   private async runInternal(
     input: WebAgentRunInput,
     signal?: AbortSignal,
+    onEvent?: (event: AgentLoopEvent) => void | Promise<void>,
   ): Promise<WebAgentRunResult> {
     const messages = this.sessions.get(input.conversationId) ?? [];
     messages.push({ role: "user", content: input.message });
@@ -114,6 +119,8 @@ export class WebAgentService {
       "[web]",
       8,
       signal,
+      undefined,
+      onEvent,
     );
 
     const reply = assistantText(messages.slice(beforeLength).at(-1));

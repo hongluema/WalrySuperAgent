@@ -16,6 +16,14 @@ const MAX_STEPS = 15; // 最大步数上限：防止模型在工具调用间无�
 const MAX_RETRIES = 3; // 单步最大重试次数：网络抖动等临时错误最多重试 3 次
 const TOKEN_BUDGET = 50000; // Token 预算：累计 token 超过此值强制停止，控制成本
 
+/** Web 入口使用的 Agent 流式事件。CLI 仍保持 stdout 输出。 */
+export type AgentLoopEvent =
+  | { type: "step-started"; step: number; maxSteps: number }
+  | { type: "text-delta"; text: string }
+  | { type: "tool-call"; toolName: string; input: unknown }
+  | { type: "tool-result"; toolName: string; output: unknown }
+  | { type: "done"; text: string };
+
 // --- Agent 主循环 ---
 
 // 参数说明：
@@ -34,6 +42,7 @@ export async function agentLoop(
   maxSteps?: number,
   signal?: AbortSignal,
   trace?: LocalTraceRecorder,
+  onEvent?: (event: AgentLoopEvent) => void | Promise<void>,
 ) {
   let step = 0; // 当前步数（每轮模型调用+工具执行算一步）
   let totalTokens = 0; // 累计 token 消耗
@@ -49,6 +58,7 @@ export async function agentLoop(
     }
 
     step++;
+    await onEvent?.({ type: "step-started", step, maxSteps: stepLimit });
 
     if (tag) {
       console.log(`${prefix}Step ${step}/${stepLimit}`);
@@ -95,6 +105,7 @@ export async function agentLoop(
             case "text-delta":
               process.stdout.write(part.text);
               fullText += part.text;
+              await onEvent?.({ type: "text-delta", text: part.text });
               break;
 
             // 工具调用：模型请求执行某个工具，记录调用信息并做循环检测
@@ -104,6 +115,7 @@ export async function agentLoop(
               console.log(
                 `  [调用: ${part.toolName}(${JSON.stringify(part.input)})]`,
               );
+              await onEvent?.({ type: "tool-call", toolName: part.toolName, input: part.input });
 
               // 循环检测：连续调用同一个工具、传同样的参数——明显是在兜圈子
               const detection = detect(part.toolName, part.input);
@@ -133,6 +145,7 @@ export async function agentLoop(
               const preview =
                 output.length > 120 ? output.slice(0, 120) + "..." : output;
               console.log(`  [结果: ${part.toolName}] ${preview}`);
+              await onEvent?.({ type: "tool-result", toolName: part.toolName, output: part.output });
               if (lastToolCall) {
                 // 为最近一次工具调用补录结果指纹，供“无进展”检测使用
                 recordResult(
@@ -233,6 +246,7 @@ export async function agentLoop(
   if (step >= stepLimit) {
     console.log("\n[达到最大步数]");
   }
+  await onEvent?.({ type: "done", text: "" });
 }
 
 /**
