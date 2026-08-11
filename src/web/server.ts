@@ -45,7 +45,13 @@ app.post("/api/v1/runs", async (context) => {
 
       void agent
         .run(parsed.data, context.req.raw.signal, send)
-        .then(() => controller.close())
+        .then((result) => {
+          // TutorOrchestrator emits its own semantic terminal event. Generic
+          // Agent Loop runs return a non-empty final message and need the
+          // web-layer terminal event here.
+          if (result.message.content) send({ type: "run.completed", runId: result.runId });
+          controller.close();
+        })
         .catch((error) => {
           const message = error instanceof Error ? error.message : "Agent 运行失败";
           console.error(`[web-agent] ${message}`);

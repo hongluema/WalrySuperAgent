@@ -6,3 +6,5 @@ node_modules/
 .cron/
 super-agent.config.json
 .traces/
+*/*.test.ts
+.tutor-data/

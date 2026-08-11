@@ -12,6 +12,8 @@ import { loadConfig } from "../config/loader.js";
 import type { SuperAgentConfig } from "../config/schema.js";
 import { calculatorTool, weatherTool } from "../tools/utility-tools.js";
 import { ToolRegistry } from "../tools/registry.js";
+import { TutorOrchestrator } from "../tutor/orchestrator.js";
+import type { TutorEvent } from "../tutor/types.js";
 
 export interface WebAgentRunInput {
   conversationId: string;
@@ -57,6 +59,7 @@ export class WebAgentService {
   private readonly model: any;
   private readonly promptBuilder: PromptBuilder;
   private readonly sessions = new Map<string, ModelMessage[]>();
+  private readonly tutor = new TutorOrchestrator();
   private runQueue: Promise<unknown> = Promise.resolve();
 
   constructor() {
@@ -79,7 +82,7 @@ export class WebAgentService {
   run(
     input: WebAgentRunInput,
     signal?: AbortSignal,
-    onEvent?: (event: AgentLoopEvent) => void | Promise<void>,
+    onEvent?: (event: AgentLoopEvent | TutorEvent) => void | Promise<void>,
   ): Promise<WebAgentRunResult> {
     const task = this.runQueue.then(() => this.runInternal(input, signal, onEvent));
     this.runQueue = task.then(
@@ -92,8 +95,23 @@ export class WebAgentService {
   private async runInternal(
     input: WebAgentRunInput,
     signal?: AbortSignal,
-    onEvent?: (event: AgentLoopEvent) => void | Promise<void>,
+    onEvent?: (event: AgentLoopEvent | TutorEvent) => void | Promise<void>,
   ): Promise<WebAgentRunResult> {
+    const tutorSession = await this.tutor.hasActiveSession(input.conversationId);
+    if (tutorSession || this.tutor.isTutorIntent(input.message)) {
+      await this.tutor.run(
+        input.conversationId,
+        input.message,
+        (event) => onEvent?.(event),
+        signal,
+      );
+      return {
+        runId: `run_${Date.now().toString(36)}`,
+        conversationId: input.conversationId,
+        message: { role: "assistant", content: "" },
+      };
+    }
+
     const messages = this.sessions.get(input.conversationId) ?? [];
     messages.push({ role: "user", content: input.message });
 
