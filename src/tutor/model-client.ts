@@ -1,7 +1,21 @@
 import { generateText, streamText } from "ai";
 import { z } from "zod";
 import type { ModelMessage } from "ai";
-import type { TopicModel, TutorTurnDecision, TutorState } from "./types.js";
+import type { TopicModel, TutorDiagnosis, TutorTurnDecision, TutorState } from "./types.js";
+
+const capabilityPlanSchema = z.object({
+  acquisition: z.array(z.string()),
+  structuring: z.array(z.string()),
+  interaction: z.array(z.string()),
+  assessment: z.array(z.string()),
+  missing: z.array(z.string()),
+});
+
+const learningEvidenceSchema = z.object({
+  learnerQuote: z.string(),
+  criterion: z.enum(["accurate", "explained", "discrimination", "transfer", "performance"]),
+  strength: z.enum(["weak", "sufficient"]),
+});
 
 const diagnosticOptionSchema = z.object({ id: z.string(), label: z.string() });
 const topicModelSchema = z.object({
@@ -18,9 +32,23 @@ const topicModelSchema = z.object({
   conceptRoute: z.array(z.object({ id: z.string(), title: z.string(), target: z.string() })).min(2).max(10),
   boundaryCases: z.array(z.string()).min(1).max(8),
   practiceTarget: z.string(),
-  rubricAnchors: z.array(z.object({ conceptId: z.string(), accuracy: z.string(), transfer: z.string() })),
+  rubricAnchors: z.array(z.object({
+    conceptId: z.string(),
+    accuracy: z.string(),
+    explanation: z.string(),
+    discrimination: z.string(),
+    transfer: z.string(),
+    performance: z.string().optional(),
+  })),
   evidenceSources: z.array(z.string()),
   confidence: z.number().min(0).max(1),
+  subject: z.object({ kind: z.string(), description: z.string(), userGoal: z.string() }),
+  grounding: z.object({
+    mode: z.string(),
+    sources: z.array(z.object({ label: z.string(), verified: z.boolean() })),
+    limitations: z.array(z.string()),
+  }),
+  capabilities: capabilityPlanSchema,
 });
 
 const turnDecisionSchema = z.object({
@@ -31,6 +59,7 @@ const turnDecisionSchema = z.object({
     status: z.enum(["not-answered", "insufficient", "partial", "misconception", "mastered"]),
     score: z.number().min(0).max(100).optional(),
     rubricEvidence: z.array(z.string()),
+    evidence: z.array(learningEvidenceSchema),
   }),
   nextAction: z.enum(["explain", "give-example", "ask-clarification", "repair-misconception", "ask-socratic-question", "give-practice", "advance-concept", "switch-topic", "complete"]),
   statePatch: z.object({
@@ -38,7 +67,21 @@ const turnDecisionSchema = z.object({
     addMisconception: z.string().optional(),
     masteredConceptId: z.string().optional(),
   }),
-  responsePlan: z.object({ goal: z.string(), keyPoints: z.array(z.string()), question: z.string().optional() }),
+  responsePlan: z.object({
+    goal: z.string(),
+    teachingAtom: z.string(),
+    gapToRepair: z.string(),
+    keyPoints: z.array(z.string()),
+    allowedContent: z.array(z.string()),
+    forbiddenContent: z.array(z.string()),
+    question: z.string().optional(),
+  }),
+});
+
+const diagnosisSchema = z.object({
+  summary: z.string(),
+  learnerProfile: z.array(z.string()),
+  evidence: z.array(z.object({ quote: z.string(), implication: z.string() })),
 });
 
 export type TutorModelClient = {
@@ -52,6 +95,11 @@ export type TutorModelClient = {
     state: TutorState;
     topicModel: TopicModel;
   }, signal?: AbortSignal): Promise<TutorTurnDecision>;
+  compileDiagnosis(input: {
+    state: TutorState;
+    topicModel: TopicModel;
+    answeredDiagnostics: Array<{ id: string; question: string; optionId: string; optionLabel: string }>;
+  }, signal?: AbortSignal): Promise<TutorDiagnosis>;
   streamResponse(input: {
     message: string;
     state: TutorState;
@@ -68,6 +116,9 @@ function formatTopicContext(model: TopicModel): string {
     boundaries: model.boundaryCases,
     practice: model.practiceTarget,
     rubric: model.rubricAnchors,
+    subject: model.subject,
+    grounding: model.grounding,
+    capabilities: model.capabilities,
   });
 }
 
@@ -80,51 +131,24 @@ function extractJson(text: string): string {
 }
 
 const topicModelContract = {
-  id: "ai-comic-course",
-  topic: "ai-comic",
-  lessonTitle: "如何用 AI 制作漫剧",
-  coreOutcome: "能够从创意、剧本、分镜到成片完成一个可验证的小作品。",
-  diagnosticDimensions: [
-    {
-      id: "experience",
-      tab: "已有经验",
-      question: "你目前做过哪些相关尝试？",
-      options: [
-        { id: "A", label: "做过完整作品" },
-        { id: "B", label: "尝试过部分环节" },
-        { id: "C", label: "还没有实际尝试" },
-      ],
-    },
-  ],
-  conceptRoute: [
-    { id: "concept-1", title: "第一个关键概念", target: "完成一个可验证的小任务" },
-  ],
-  boundaryCases: ["看起来完成不等于在真实场景中有效"],
-  practiceTarget: "完成一个最小可行作品并验证结果",
-  rubricAnchors: [
-    { conceptId: "concept-1", accuracy: "能解释关键机制", transfer: "能在新场景中独立应用" },
-  ],
-  evidenceSources: ["用户目标", "相关主题资料"],
-  confidence: 0.8,
+  requiredFields: ["id", "topic", "lessonTitle", "coreOutcome", "diagnosticDimensions", "conceptRoute", "boundaryCases", "practiceTarget", "rubricAnchors", "evidenceSources", "confidence", "subject", "grounding", "capabilities"],
+  diagnosticDimensionFields: ["id", "tab", "question", "options: { id, label }[]"],
+  conceptRouteFields: ["id", "title", "target"],
+  rubricFields: ["conceptId", "accuracy", "explanation", "discrimination", "transfer", "performance?"],
+  subjectFields: ["kind", "description", "userGoal"],
+  groundingFields: ["mode", "sources: { label, verified }[]", "limitations"],
+  capabilityFields: ["acquisition", "structuring", "interaction", "assessment", "missing"],
 };
 
 const turnDecisionContract = {
-  intent: "dont_know",
-  understoodMeaning: "用户暂时无法回答当前问题",
-  evidence: [
-    { quote: "不知道", implication: "用户没有提供可评估的知识证据" },
-  ],
-  assessment: {
-    status: "not-answered",
-    rubricEvidence: [],
-  },
-  nextAction: "give-example",
-  statePatch: {},
-  responsePlan: {
-    goal: "降低难度并通过例子帮助用户理解",
-    keyPoints: ["先给出一个具体例子"],
-    question: "你能指出例子中的哪一步吗？",
-  },
+  requiredFields: ["intent", "understoodMeaning", "evidence", "assessment", "nextAction", "statePatch", "responsePlan"],
+  intentValues: ["answer", "dont_know", "disagreement", "clarification", "direct_answer_request", "topic_switch", "meta_question", "stop"],
+  assessmentStatusValues: ["not-answered", "insufficient", "partial", "misconception", "mastered"],
+  nextActionValues: ["explain", "give-example", "ask-clarification", "repair-misconception", "ask-socratic-question", "give-practice", "advance-concept", "switch-topic", "complete"],
+  assessmentFields: ["status", "score?", "rubricEvidence", "evidence"],
+  learningEvidenceFields: ["learnerQuote", "criterion: accurate|explained|discrimination|transfer|performance", "strength: weak|sufficient"],
+  statePatchFields: ["activeConceptId?", "addMisconception?", "masteredConceptId?"],
+  responsePlanFields: ["goal", "teachingAtom", "gapToRepair", "keyPoints", "allowedContent", "forbiddenContent", "question?"],
 };
 
 function textValue(value: unknown): string | undefined {
@@ -168,10 +192,32 @@ export function normalizeTopicModel(value: unknown): unknown {
     rubricAnchors: Array.isArray(rubrics) ? rubrics.map((item: any, index: number) => ({
       conceptId: textValue(item?.conceptId) ?? textValue(item?.concept) ?? textValue(item?.id) ?? `concept-${index + 1}`,
       accuracy: textValue(item?.accuracy) ?? textValue(item?.criteria) ?? textValue(item?.understanding) ?? textValue(item?.description) ?? textValue(item?.准确性),
+      explanation: textValue(item?.explanation) ?? textValue(item?.reasoning) ?? "能说明关键结论为什么成立",
+      discrimination: textValue(item?.discrimination) ?? textValue(item?.comparison) ?? "能区分相近概念和常见误解",
       transfer: textValue(item?.transfer) ?? textValue(item?.application) ?? textValue(item?.practice) ?? textValue(item?.迁移),
+      performance: textValue(item?.performance),
     })) : rubrics,
     evidenceSources: Array.isArray(source.evidenceSources ?? source.sources) ? (source.evidenceSources ?? source.sources).map((item: any) => textValue(item) ?? JSON.stringify(item)) : [],
     confidence: typeof source.confidence === "number" ? source.confidence : 0.6,
+    subject: {
+      kind: textValue(source.subject?.kind) ?? textValue(source.kind) ?? "open-learning-subject",
+      description: textValue(source.subject?.description) ?? textValue(source.lessonTitle) ?? textValue(source.title) ?? "当前学习对象",
+      userGoal: textValue(source.subject?.userGoal) ?? textValue(source.userGoal) ?? textValue(source.coreOutcome) ?? textValue(source.outcome) ?? "理解并应用当前学习对象",
+    },
+    grounding: {
+      mode: textValue(source.grounding?.mode) ?? "model-knowledge",
+      sources: Array.isArray(source.grounding?.sources)
+        ? source.grounding.sources.map((item: any) => ({ label: textValue(item?.label) ?? String(item), verified: item?.verified === true }))
+        : [],
+      limitations: Array.isArray(source.grounding?.limitations) ? source.grounding.limitations.map((item: any) => String(item)) : ["未提供可直接核验的学习材料"],
+    },
+    capabilities: {
+      acquisition: Array.isArray(source.capabilities?.acquisition) ? source.capabilities.acquisition.map(String) : ["model-knowledge"],
+      structuring: Array.isArray(source.capabilities?.structuring) ? source.capabilities.structuring.map(String) : ["concept-dependency"],
+      interaction: Array.isArray(source.capabilities?.interaction) ? source.capabilities.interaction.map(String) : ["socratic-dialogue"],
+      assessment: Array.isArray(source.capabilities?.assessment) ? source.capabilities.assessment.map(String) : ["explanation", "transfer"],
+      missing: Array.isArray(source.capabilities?.missing) ? source.capabilities.missing.map(String) : [],
+    },
   };
 }
 
@@ -228,12 +274,33 @@ export class AiTutorModelClient implements TutorModelClient {
       system: [
         "你是一个通用的一对一学习教练的课程设计器。",
         "你不能依赖预设主题列表，必须为任意用户主题动态建立 TopicModel。",
+        "不要把学习对象归入封闭类型枚举；subject.kind 是开放标签。请按知识取得、内容组织、教学互动、掌握验证四组能力描述任务。",
+        "忠于用户原始学习对象和目标，不得擅自扩张成更大的领域课程、考试课或项目课。",
+        "只有真实提供或检索到的来源 verified 才能为 true；模型已有知识不是已验证研究。",
         "诊断问题要覆盖既往经验、概念理解、边界辨析和迁移能力。",
+        "至少一题要求用户完成真实判断，不要全部使用自我评价题，也不要在诊断前泄露答案。",
         "路线必须服务于用户目标，不能把不相关主题的模板套进来。",
         `必须严格返回以下字段结构，字段名不能改名：${JSON.stringify(topicModelContract)}`,
         "只输出符合 schema 的结构化对象。",
       ].join("\n"),
       prompt: JSON.stringify({ userGoal: input.userGoal, history: input.history, materials: input.materials ?? [] }),
+    });
+  }
+
+  async compileDiagnosis(input: { state: TutorState; topicModel: TopicModel; answeredDiagnostics: Array<{ id: string; question: string; optionId: string; optionLabel: string }> }, signal?: AbortSignal): Promise<TutorDiagnosis> {
+    return generateJson({
+      model: this.model,
+      schema: diagnosisSchema,
+      signal,
+      contract: { requiredFields: ["summary", "learnerProfile", "evidence"] },
+      system: [
+        "你是通用私教的诊断编译器，只处理已经完成的结构化诊断答案。",
+        "每条判断必须引用具体题目和所选选项，不能把已作答诊断解释成不知道或没有证据。",
+        "诊断只描述学习起点，不要讲课程内容，也不要生成教学计划。",
+        "学习对象是开放的；忠于用户目标，不根据类型擅自扩大课程范围。",
+        `必须严格遵守字段要求：${JSON.stringify({ requiredFields: ["summary", "learnerProfile", "evidence"] })}`,
+      ].join("\n"),
+      prompt: JSON.stringify({ answeredDiagnostics: input.answeredDiagnostics, topic: formatTopicContext(input.topicModel), currentState: input.state }),
     });
   }
 
@@ -249,6 +316,8 @@ export class AiTutorModelClient implements TutorModelClient {
         "特别区分：回答、不知道、反驳老师、请求澄清、要求直接讲解和切换主题。",
         "用户说“不知道”不是错误答案；用户说“错了”不是知识作答，而是对老师判断的异议。",
         "只有用户提供了与当前 rubric 相关的可观察证据，才能评估为 partial 或 mastered。",
+        "必须引用用户原话并分别记录准确、解释、辨析、迁移或实操证据；没有对应证据不得假定掌握。",
+        "每轮只选择一个 teachingAtom，只修复一个 gapToRepair。allowedContent 必须足够窄，forbiddenContent 要阻止提前教授后续节点。",
         "不要凭固定关键词评分，不要假设用户接受了老师上一轮判断。",
         `必须严格遵守以下字段结构，字段名和值类型不能改变：${JSON.stringify(turnDecisionContract)}`,
         "只输出符合 schema 的结构化对象。",
@@ -270,6 +339,8 @@ export class AiTutorModelClient implements TutorModelClient {
         "你是一个专业、耐心、使用苏格拉底式引导的通用私教。",
         "根据教学决策生成自然语言回答，不要暴露隐藏推理过程。",
         "先回应用户当前真实意图，再给最小必要解释或例子，最后只问一个核心问题。",
+        "严格执行 decision.responsePlan：只讲 teachingAtom 和 allowedContent，不得输出 forbiddenContent，不得一次总结整门课程。",
+        "正文原则上不超过 600 个中文字符。",
         "如果用户表示不知道，降低难度并给例子；如果用户反驳，先承认并澄清，不要强行评价。",
       ].join("\n"),
       prompt: JSON.stringify({

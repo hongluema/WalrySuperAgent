@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
-import { isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
+import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
 
 const phaseLabels = {
-  research: "正在阅读资料并建立主题模型",
+  research: "正在建立学习对象与能力模型",
   diagnose: "正在进行诊断",
   plan: "正在整理学习路线",
   teach: "正在进行一对一练习",
@@ -28,6 +28,36 @@ function makeRoadmap(model: TopicModel) {
   return model.conceptRoute.map((node, index) => ({ ...node, status: index === 0 ? "active" as const : "locked" as const }));
 }
 
+function answeredDiagnostics(state: TutorState) {
+  return state.diagnosticCards.flatMap((card) => {
+    const optionId = state.diagnosticAnswers[card.id];
+    const option = card.options.find((item) => item.id === optionId);
+    return option ? [{ id: card.id, question: card.question, optionId, optionLabel: option.label }] : [];
+  });
+}
+
+function firstTeachingDecision(model: TopicModel, diagnosisSummary: string): TutorTurnDecision {
+  const first = model.conceptRoute[0];
+  const next = model.conceptRoute[1];
+  return {
+    intent: "answer",
+    understoodMeaning: "用户已完成诊断，可以从第一个学习节点开始",
+    evidence: [{ quote: diagnosisSummary, implication: "诊断已完成并形成学习起点" }],
+    assessment: { status: "not-answered", rubricEvidence: [], evidence: [] },
+    nextAction: "explain",
+    statePatch: {},
+    responsePlan: {
+      goal: `开始学习“${first?.title ?? "第一个节点"}”`,
+      teachingAtom: first?.title ?? "第一个节点",
+      gapToRepair: first?.target ?? "尚未获得当前节点的学习证据",
+      keyPoints: first ? [first.target] : [model.coreOutcome],
+      allowedContent: [first?.title ?? "当前节点", first?.target ?? model.coreOutcome],
+      forbiddenContent: next ? [`后续节点：${next.title}`, "完整课程讲解"] : ["完整课程讲解"],
+      question: first ? `结合你的理解，你认为“${first.title}”最关键的区别或机制是什么？` : "你目前对这个主题的理解是什么？",
+    },
+  };
+}
+
 function makeTrace(state: TutorState, model: TopicModel, decision: TutorTurnDecision, evidence: string[]): VisibleReasoningTrace {
   const current = model.conceptRoute[state.activeConcept] ?? model.conceptRoute[0];
   return {
@@ -42,13 +72,13 @@ function makeTrace(state: TutorState, model: TopicModel, decision: TutorTurnDeci
     selectedAction: decision.nextAction,
     actionReason: decision.responsePlan.goal,
     stateUpdates: [`当前阶段：${state.phase}`, `当前路线节点：${current?.title ?? "动态主题模型尚未建立"}`],
-    sourceCount: model.evidenceSources.length,
+    sourceCount: model.grounding.sources.filter((source) => source.verified).length,
   };
 }
 
 function emptyState(conversationId: string): TutorState {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     conversationId,
     phase: "idle",
     diagnosticCards: [],
@@ -58,6 +88,8 @@ function emptyState(conversationId: string): TutorState {
     activeConcept: 0,
     turnCount: 0,
     messages: [],
+    learnerProfile: [],
+    nodeLearningStates: {},
     updatedAt: new Date().toISOString(),
   };
 }
@@ -89,11 +121,16 @@ export class TutorOrchestrator {
     const runId = `run_${randomUUID().slice(0, 8)}`;
     await emit({ type: "run.started", runId, conversationId });
     let state = await this.store.load(conversationId);
-    if (!state || state.schemaVersion !== 3) state = emptyState(conversationId);
+    if (!state) state = emptyState(conversationId);
+    else {
+      state.schemaVersion = 4;
+      state.learnerProfile ??= [];
+      state.nodeLearningStates ??= {};
+    }
 
     try {
       state.messages.push({ role: "user", content: message });
-      let topicModel = state.topicModel;
+      let topicModel = state.topicModel ? ensureTopicModelDefaults(state.topicModel) : undefined;
 
       const isNewTopic = !topicModel || (
         state.phase !== "idle" &&
@@ -104,7 +141,7 @@ export class TutorOrchestrator {
 
       if (isNewTopic) {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });
-        topicModel = await this.modelClient.buildTopicModel({ userGoal: message, history: state.messages }, signal);
+        topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({ userGoal: message, history: state.messages }, signal));
         state.topicModel = topicModel;
         state.topic = topicModel.topic;
         state.lessonTitle = topicModel.lessonTitle;
@@ -114,7 +151,8 @@ export class TutorOrchestrator {
         state.currentCard = 0;
         state.activeConcept = 0;
         state.phase = "research";
-        await emit({ type: "research.completed", sourceCount: topicModel.evidenceSources.length, researchedAt: new Date().toISOString() });
+        const verifiedSourceCount = topicModel.grounding.sources.filter((source) => source.verified).length;
+        if (verifiedSourceCount > 0) await emit({ type: "research.completed", sourceCount: verifiedSourceCount, researchedAt: new Date().toISOString() });
         await emit({ type: "topic.model.ready", title: topicModel.lessonTitle, outcome: topicModel.coreOutcome, topic: topicModel.topic });
 
         if (isDirectHelpRequest(message)) {
@@ -137,12 +175,16 @@ export class TutorOrchestrator {
           intent: "answer",
           understoodMeaning: "用户希望系统学习当前主题",
           evidence: [{ quote: message, implication: "用户提出了明确的学习目标" }],
-          assessment: { status: "not-answered", rubricEvidence: [] },
+          assessment: { status: "not-answered", rubricEvidence: [], evidence: [] },
           nextAction: "ask-socratic-question",
           statePatch: {},
           responsePlan: {
             goal: `建立“${topicModel.lessonTitle}”的初始学习地图，并收集当前经验`,
+            teachingAtom: "说明学习目标并收集第一份起点证据",
+            gapToRepair: "尚无学习者起点证据",
             keyPoints: [topicModel.coreOutcome],
+            allowedContent: ["学习目标", "第一道诊断问题"],
+            forbiddenContent: ["完整课程讲解", "替学习者做诊断结论"],
             question: state.diagnosticCards[0]?.question,
           },
         };
@@ -174,13 +216,15 @@ export class TutorOrchestrator {
         }
 
         state.phase = "plan";
-        const decision = await this.modelClient.analyzeTurn({
-          message: `用户已完成全部诊断卡：${JSON.stringify(state.diagnosticAnswers)}`,
+        const diagnosis = await this.modelClient.compileDiagnosis({
           state,
           topicModel,
+          answeredDiagnostics: answeredDiagnostics(state),
         }, signal);
+        const decision = firstTeachingDecision(topicModel, diagnosis.summary);
+        state.learnerProfile = diagnosis.learnerProfile;
         state.lastDecision = decision;
-        await emit({ type: "diagnosis.ready", diagnosis: decision.responsePlan.goal, background: decision.evidence.map((item) => `${item.quote}：${item.implication}`) });
+        await emit({ type: "diagnosis.ready", diagnosis: diagnosis.summary, background: diagnosis.learnerProfile });
         await emit({ type: "roadmap.ready", roadmap: state.roadmap });
         state.phase = "teach";
         await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
@@ -210,13 +254,38 @@ export class TutorOrchestrator {
   }
 
   private applyStatePatch(state: TutorState, model: TopicModel, decision: TutorTurnDecision) {
+    const current = model.conceptRoute[state.activeConcept] ?? model.conceptRoute[0];
+    if (current) {
+      const nodeState = state.nodeLearningStates[current.id] ?? {
+        nodeId: current.id,
+        stage: "elicit" as const,
+        evidence: [],
+        misconceptions: [],
+        questionsAsked: [],
+      };
+      nodeState.evidence.push(...decision.assessment.evidence);
+      if (decision.responsePlan.question && !nodeState.questionsAsked.includes(decision.responsePlan.question)) {
+        nodeState.questionsAsked.push(decision.responsePlan.question);
+      }
+      if (decision.statePatch.addMisconception) {
+        nodeState.misconceptions.push({ description: decision.statePatch.addMisconception, status: "open" });
+        nodeState.stage = "repair";
+      }
+      state.nodeLearningStates[current.id] = nodeState;
+    }
     if (decision.statePatch.activeConceptId) {
       const index = model.conceptRoute.findIndex((item) => item.id === decision.statePatch.activeConceptId);
       if (index >= 0) state.activeConcept = index;
     }
     if (decision.statePatch.masteredConceptId) {
       const index = model.conceptRoute.findIndex((item) => item.id === decision.statePatch.masteredConceptId);
-      if (index >= 0 && state.roadmap[index]) state.roadmap[index].status = "mastered";
+      const nodeState = index >= 0 ? state.nodeLearningStates[decision.statePatch.masteredConceptId] : undefined;
+      const sufficient = new Set(nodeState?.evidence.filter((item) => item.strength === "sufficient").map((item) => item.criterion));
+      const hasCoreEvidence = ["accurate", "explained", "discrimination", "transfer"].every((criterion) => sufficient.has(criterion as any));
+      if (index >= 0 && state.roadmap[index] && hasCoreEvidence) {
+        state.roadmap[index].status = "mastered";
+        if (nodeState) nodeState.stage = "mastered";
+      }
     }
   }
 

@@ -19,7 +19,32 @@ export type TutorTurnIntent =
 export type TopicRubricAnchor = {
   conceptId: string;
   accuracy: string;
+  explanation: string;
+  discrimination: string;
   transfer: string;
+  performance?: string;
+};
+
+export type LearningCapabilityPlan = {
+  acquisition: string[];
+  structuring: string[];
+  interaction: string[];
+  assessment: string[];
+  missing: string[];
+};
+
+export type LearningEvidence = {
+  learnerQuote: string;
+  criterion: "accurate" | "explained" | "discrimination" | "transfer" | "performance";
+  strength: "weak" | "sufficient";
+};
+
+export type NodeLearningState = {
+  nodeId: string;
+  stage: "introduce" | "elicit" | "repair" | "practice" | "transfer" | "doubt-check" | "mastered";
+  evidence: LearningEvidence[];
+  misconceptions: Array<{ description: string; status: "open" | "repaired" }>;
+  questionsAsked: string[];
 };
 
 export type TopicModel = {
@@ -43,6 +68,23 @@ export type TopicModel = {
   rubricAnchors: TopicRubricAnchor[];
   evidenceSources: string[];
   confidence: number;
+  subject: {
+    kind: string;
+    description: string;
+    userGoal: string;
+  };
+  grounding: {
+    mode: string;
+    sources: Array<{ label: string; verified: boolean }>;
+    limitations: string[];
+  };
+  capabilities: LearningCapabilityPlan;
+};
+
+export type TutorDiagnosis = {
+  summary: string;
+  learnerProfile: string[];
+  evidence: Array<{ quote: string; implication: string }>;
 };
 
 export type TutorTurnDecision = {
@@ -53,6 +95,7 @@ export type TutorTurnDecision = {
     status: "not-answered" | "insufficient" | "partial" | "misconception" | "mastered";
     score?: number;
     rubricEvidence: string[];
+    evidence: LearningEvidence[];
   };
   nextAction:
     | "explain"
@@ -71,7 +114,11 @@ export type TutorTurnDecision = {
   };
   responsePlan: {
     goal: string;
+    teachingAtom: string;
+    gapToRepair: string;
     keyPoints: string[];
+    allowedContent: string[];
+    forbiddenContent: string[];
     question?: string;
   };
 };
@@ -130,7 +177,7 @@ export type VisibleReasoningTrace = {
 };
 
 export type TutorState = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   conversationId: string;
   phase: TutorPhase;
   topic?: string;
@@ -144,6 +191,8 @@ export type TutorState = {
   activeConcept: number;
   turnCount: number;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
+  learnerProfile: string[];
+  nodeLearningStates: Record<string, NodeLearningState>;
   updatedAt: string;
   lastDecision?: TutorTurnDecision;
 };

@@ -8,6 +8,7 @@ import { TutorStore } from "./store.js";
 import type { TopicModel, TutorEvent, TutorState, TutorTurnDecision } from "./types.js";
 import type { TutorModelClient } from "./model-client.js";
 import { normalizeTopicModel } from "./model-client.js";
+import { ensureTopicModelDefaults } from "./topic-model.js";
 
 function fakeTopicModel(): TopicModel {
   return {
@@ -26,9 +27,24 @@ function fakeTopicModel(): TopicModel {
     ],
     boundaryCases: ["概念理解不等于能够迁移"],
     practiceTarget: "完成一个真实小任务",
-    rubricAnchors: [{ conceptId: "concept-1", accuracy: "能准确解释", transfer: "能在新场景应用" }],
+    rubricAnchors: [{
+      conceptId: "concept-1",
+      accuracy: "能准确解释",
+      explanation: "能说明原因",
+      discrimination: "能区分相似概念",
+      transfer: "能在新场景应用",
+    }],
     evidenceSources: ["用户目标"],
     confidence: 0.9,
+    subject: { kind: "任意开放标签", description: "任意主题", userGoal: "理解并应用" },
+    grounding: { mode: "model-knowledge", sources: [], limitations: ["没有外部材料"] },
+    capabilities: {
+      acquisition: ["model-knowledge"],
+      structuring: ["concept-dependency"],
+      interaction: ["socratic-dialogue"],
+      assessment: ["explanation", "transfer"],
+      missing: [],
+    },
   };
 }
 
@@ -38,16 +54,29 @@ function fakeDecision(message: string): TutorTurnDecision {
     intent: dontKnow ? "dont_know" : "answer",
     understoodMeaning: dontKnow ? "用户暂时无法回答当前问题" : "用户正在回答当前问题",
     evidence: [{ quote: message, implication: dontKnow ? "没有可评估的答案证据" : "用户提供了回答" }],
-    assessment: { status: dontKnow ? "not-answered" : "partial", score: dontKnow ? undefined : 60, rubricEvidence: [] },
+    assessment: { status: dontKnow ? "not-answered" : "partial", score: dontKnow ? undefined : 60, rubricEvidence: [], evidence: [] },
     nextAction: dontKnow ? "give-example" : "ask-socratic-question",
     statePatch: {},
-    responsePlan: { goal: dontKnow ? "降低难度并提供例子" : "继续验证理解", keyPoints: ["用一个具体场景说明"] },
+    responsePlan: {
+      goal: dontKnow ? "降低难度并提供例子" : "继续验证理解",
+      teachingAtom: "一个最小概念",
+      gapToRepair: dontKnow ? "缺少回答证据" : "缺少迁移证据",
+      keyPoints: ["用一个具体场景说明"],
+      allowedContent: ["当前概念"],
+      forbiddenContent: ["后续概念"],
+      question: "你会如何判断？",
+    },
   };
 }
 
 function fakeModelClient(): TutorModelClient {
   return {
     buildTopicModel: async () => fakeTopicModel(),
+    compileDiagnosis: async ({ answeredDiagnostics }) => ({
+      summary: "已根据结构化答案完成诊断",
+      learnerProfile: answeredDiagnostics.map((item) => `${item.question}：${item.optionLabel}`),
+      evidence: answeredDiagnostics.map((item) => ({ quote: `${item.question} -> ${item.optionLabel}`, implication: "用户已经完成该诊断题" })),
+    }),
     analyzeTurn: async ({ message }: { message: string; state: TutorState; topicModel: TopicModel }) => fakeDecision(message),
     streamResponse: async ({ decision }: { message: string; state: TutorState; topicModel: TopicModel; decision: TutorTurnDecision }, onDelta: (text: string) => void | Promise<void>) => {
       await onDelta(decision.responsePlan.goal);
@@ -79,6 +108,19 @@ test("normalizes common model aliases before TopicModel validation", () => {
   assert.equal(normalized.conceptRoute[0].target, "把故事拆成可执行分镜");
   assert.equal(normalized.boundaryCases[0], "看起来完成：不等于真实有效");
   assert.equal(normalized.rubricAnchors[0].transfer, "能迁移应用");
+  assert.equal(normalized.subject.kind, "open-learning-subject");
+  assert.deepEqual(normalized.capabilities.missing, []);
+});
+
+test("upgrades legacy topic models without introducing a closed subject enum", () => {
+  const legacy = fakeTopicModel();
+  delete (legacy as Partial<TopicModel>).subject;
+  delete (legacy as Partial<TopicModel>).grounding;
+  delete (legacy as Partial<TopicModel>).capabilities;
+  const upgraded = ensureTopicModelDefaults(legacy);
+  assert.equal(upgraded.subject.kind, "open-learning-subject");
+  assert.equal(upgraded.grounding.sources.length, 0);
+  assert.deepEqual(upgraded.capabilities.structuring, ["concept-dependency"]);
 });
 
 test("runs the diagnostic journey and persists resumable state", async () => {
@@ -95,7 +137,7 @@ test("runs the diagnostic journey and persists resumable state", async () => {
       events.filter((event) => event.type === "diagnostic.card.ready").map((event) => (event.card as { index: number }).index),
       [0],
     );
-    assert.ok(events.some((event) => event.type === "research.completed"));
+    assert.equal(events.some((event) => event.type === "research.completed"), false);
     assert.ok(events.some((event) => event.type === "message.delta"));
     const latestTrace = [...events].reverse().find((event) => event.type === "reasoning.trace.ready");
     assert.equal(latestTrace?.type, "reasoning.trace.ready");
@@ -106,18 +148,25 @@ test("runs the diagnostic journey and persists resumable state", async () => {
 
     events.length = 0;
     await tutor.run("test-session", "完成诊断", emit, undefined, {
-      diagnosticAnswers: { workflow: "B", validation: "B", trust: "B" },
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
     });
 
     assert.ok(events.some((event) => event.type === "diagnosis.ready"));
     assert.ok(events.some((event) => event.type === "roadmap.ready"));
     assert.ok(events.some((event) => event.type === "reasoning.trace.ready"));
     assert.ok(events.some((event) => event.type === "state.saved"));
+    const teachingTrace = events.find((event) => event.type === "reasoning.trace.ready");
+    assert.equal(teachingTrace?.type, "reasoning.trace.ready");
+    if (teachingTrace?.type === "reasoning.trace.ready") {
+      assert.equal(teachingTrace.trace.selectedAction, "explain");
+      assert.match(teachingTrace.trace.currentGoal, /第一个概念/);
+    }
 
-    const state = JSON.parse(await readFile(join(root, "sessions", "test-session.json"), "utf8")) as { schemaVersion: number; phase: string; currentCard: number };
-    assert.equal(state.schemaVersion, 3);
+    const state = JSON.parse(await readFile(join(root, "sessions", "test-session.json"), "utf8")) as { schemaVersion: number; phase: string; currentCard: number; learnerProfile: string[] };
+    assert.equal(state.schemaVersion, 4);
     assert.equal(state.phase, "teach");
     assert.equal(state.currentCard, 2);
+    assert.ok(state.learnerProfile.some((item) => item.includes("没做过")));
     assert.match(await readFile(join(root, "events", "test-session.jsonl"), "utf8"), /state\.saved/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -139,7 +188,7 @@ test("any topic uses the same dynamic diagnostic protocol", async () => {
 
     events.length = 0;
     await tutor.run("writing-session", "完成诊断", emit, undefined, {
-      diagnosticAnswers: { purpose: "B", structure: "B", revision: "B" },
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
     });
     assert.ok(events.some((event) => event.type === "diagnosis.ready"));
     assert.ok(events.some((event) => event.type === "roadmap.ready"));
@@ -166,6 +215,45 @@ test("switching topics rebuilds a dynamic topic model", async () => {
       events.filter((event) => event.type === "diagnostic.card.ready").map((event) => event.card.index),
       [0],
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("does not mark a node mastered without sufficient evidence in all core criteria", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-mastery-gate-test-"));
+  try {
+    let fullEvidence = false;
+    const client = fakeModelClient();
+    client.analyzeTurn = async ({ message }) => ({
+      ...fakeDecision(message),
+      assessment: {
+        status: "mastered",
+        score: 95,
+        rubricEvidence: [],
+        evidence: (fullEvidence
+          ? ["accurate", "explained", "discrimination", "transfer"] as const
+          : ["accurate"] as const
+        ).map((criterion) => ({ learnerQuote: message, criterion, strength: "sufficient" as const })),
+      },
+      statePatch: { masteredConceptId: "concept-1" },
+      nextAction: "advance-concept",
+    });
+    const tutor = new TutorOrchestrator(new TutorStore(root), client);
+    const emit = (): void => {};
+
+    await tutor.run("mastery-session", "我想学习一个全新的对象", emit);
+    await tutor.run("mastery-session", "完成诊断", emit, undefined, {
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+    });
+    await tutor.run("mastery-session", "我能准确复述", emit);
+    let state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
+    assert.equal(state.roadmap[0].status, "active");
+
+    fullEvidence = true;
+    await tutor.run("mastery-session", "我还能解释、辨析并迁移", emit);
+    state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
+    assert.equal(state.roadmap[0].status, "mastered");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
