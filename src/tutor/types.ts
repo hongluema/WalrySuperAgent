@@ -85,6 +85,11 @@ export type TutorDiagnosis = {
   summary: string;
   learnerProfile: string[];
   evidence: Array<{ quote: string; implication: string }>;
+  skipSuggestions?: Array<{
+    conceptId: string;
+    reason: string;
+    confidence: "high" | "medium";
+  }>;
 };
 
 export type TutorTurnDecision = {
@@ -126,7 +131,7 @@ export type TutorTurnDecision = {
 export type UniversalTutorProfile = {
   id: "universal-mastery-tutor";
   version: string;
-  diagnosticCardMin: 3;
+  diagnosticCardMin: 2;
   diagnosticCardMax: 6;
   evidenceLayers: string[];
   masteryThreshold: number;

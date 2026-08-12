@@ -28,7 +28,7 @@ const topicModelSchema = z.object({
     tab: z.string(),
     question: z.string(),
     options: z.array(diagnosticOptionSchema).min(2).max(6),
-  })).min(3).max(6),
+  })).min(2).max(6),
   conceptRoute: z.array(z.object({ id: z.string(), title: z.string(), target: z.string() })).min(2).max(10),
   boundaryCases: z.array(z.string()).min(1).max(8),
   practiceTarget: z.string(),
@@ -82,6 +82,11 @@ const diagnosisSchema = z.object({
   summary: z.string(),
   learnerProfile: z.array(z.string()),
   evidence: z.array(z.object({ quote: z.string(), implication: z.string() })),
+  skipSuggestions: z.array(z.object({
+    conceptId: z.string(),
+    reason: z.string(),
+    confidence: z.enum(["high", "medium"]),
+  })).optional().default([]),
 });
 
 export type TutorModelClient = {
@@ -277,8 +282,10 @@ export class AiTutorModelClient implements TutorModelClient {
         "不要把学习对象归入封闭类型枚举；subject.kind 是开放标签。请按知识取得、内容组织、教学互动、掌握验证四组能力描述任务。",
         "忠于用户原始学习对象和目标，不得擅自扩张成更大的领域课程、考试课或项目课。",
         "只有真实提供或检索到的来源 verified 才能为 true；模型已有知识不是已验证研究。",
-        "诊断问题要覆盖既往经验、概念理解、边界辨析和迁移能力。",
+        "诊断问题从既往经验、概念理解、边界辨析、迁移能力等维度中，选择 2-4 个对当前主题最有区分度的维度出题，不需要凑满所有维度。",
         "至少一题要求用户完成真实判断，不要全部使用自我评价题，也不要在诊断前泄露答案。",
+        `路线节点必须是学习对象本身的知识/内容节点。判断标准：去掉这个节点后，学习者对该领域的理解是否有实质缺失？\u201C明确学习目标\u201D\u201C批判性思考\u201D\u201C形成应用清单\u201D等属于教学技法，应融入内容节点的教学过程，不作为独立节点。`,
+        "对于有明确源材料的学习（书/论文/代码库），路线应忠于源材料自身的结构。",
         "路线必须服务于用户目标，不能把不相关主题的模板套进来。",
         `必须严格返回以下字段结构，字段名不能改名：${JSON.stringify(topicModelContract)}`,
         "只输出符合 schema 的结构化对象。",
@@ -292,13 +299,14 @@ export class AiTutorModelClient implements TutorModelClient {
       model: this.model,
       schema: diagnosisSchema,
       signal,
-      contract: { requiredFields: ["summary", "learnerProfile", "evidence"] },
+      contract: { requiredFields: ["summary", "learnerProfile", "evidence", "skipSuggestions"] },
       system: [
         "你是通用私教的诊断编译器，只处理已经完成的结构化诊断答案。",
         "每条判断必须引用具体题目和所选选项，不能把已作答诊断解释成不知道或没有证据。",
         "诊断只描述学习起点，不要讲课程内容，也不要生成教学计划。",
         "学习对象是开放的；忠于用户目标，不根据类型擅自扩大课程范围。",
-        `必须严格遵守字段要求：${JSON.stringify({ requiredFields: ["summary", "learnerProfile", "evidence"] })}`,
+        "根据诊断答案，判断路线中哪些节点学习者可能已掌握，输出 skipSuggestions 数组。对于高置信度的判断（学习者明确答对核心概念题），confidence 标记为 high；对于中等置信度的判断（有一定直觉但未验证），标记为 medium。如果没有可跳过的节点，返回空数组。",
+        `必须严格遵守字段要求：${JSON.stringify({ requiredFields: ["summary", "learnerProfile", "evidence", "skipSuggestions"] })}`,
       ].join("\n"),
       prompt: JSON.stringify({ answeredDiagnostics: input.answeredDiagnostics, topic: formatTopicContext(input.topicModel), currentState: input.state }),
     });

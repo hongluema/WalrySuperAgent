@@ -36,9 +36,9 @@ function answeredDiagnostics(state: TutorState) {
   });
 }
 
-function firstTeachingDecision(model: TopicModel, diagnosisSummary: string): TutorTurnDecision {
-  const first = model.conceptRoute[0];
-  const next = model.conceptRoute[1];
+function firstTeachingDecision(model: TopicModel, diagnosisSummary: string, startIndex = 0): TutorTurnDecision {
+  const first = model.conceptRoute[startIndex];
+  const next = model.conceptRoute[startIndex + 1];
   return {
     intent: "answer",
     understoodMeaning: "用户已完成诊断，可以从第一个学习节点开始",
@@ -221,7 +221,23 @@ export class TutorOrchestrator {
           topicModel,
           answeredDiagnostics: answeredDiagnostics(state),
         }, signal);
-        const decision = firstTeachingDecision(topicModel, diagnosis.summary);
+
+        // Apply skipSuggestions: mark high-confidence known nodes
+        for (const skip of diagnosis.skipSuggestions ?? []) {
+          if (skip.confidence !== "high") continue;
+          const idx = state.roadmap.findIndex(n => n.id === skip.conceptId);
+          if (idx >= 0 && (state.roadmap[idx].status === "locked" || state.roadmap[idx].status === "active")) {
+            state.roadmap[idx].status = "known";
+          }
+        }
+        // Find first non-known/mastered node as start point
+        const startIndex = state.roadmap.findIndex(n => n.status !== "known" && n.status !== "mastered");
+        if (startIndex >= 0) {
+          state.activeConcept = startIndex;
+          state.roadmap[startIndex].status = "active";
+        }
+
+        const decision = firstTeachingDecision(topicModel, diagnosis.summary, state.activeConcept);
         state.learnerProfile = diagnosis.learnerProfile;
         state.lastDecision = decision;
         await emit({ type: "diagnosis.ready", diagnosis: diagnosis.summary, background: diagnosis.learnerProfile });

@@ -258,3 +258,44 @@ test("does not mark a node mastered without sufficient evidence in all core crit
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("skipSuggestions marks known nodes and teaching starts at correct node", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-skip-test-"));
+  try {
+    const client = fakeModelClient();
+    client.compileDiagnosis = async ({ answeredDiagnostics }) => ({
+      summary: "学习者已掌握第一个概念",
+      learnerProfile: answeredDiagnostics.map((item) => `${item.question}：${item.optionLabel}`),
+      evidence: answeredDiagnostics.map((item) => ({ quote: `${item.question} -> ${item.optionLabel}`, implication: "用户已经完成该诊断题" })),
+      skipSuggestions: [
+        { conceptId: "concept-1", reason: "用户在诊断中明确答对了核心概念题", confidence: "high" as const },
+        { conceptId: "concept-2", reason: "用户有一定直觉但未验证", confidence: "medium" as const },
+      ],
+    });
+    const tutor = new TutorOrchestrator(new TutorStore(root), client);
+    const events: TutorEvent[] = [];
+    const emit = (event: TutorEvent): void => { events.push(event); };
+
+    await tutor.run("skip-session", "我想学习一个有基础的主题", emit);
+    events.length = 0;
+    await tutor.run("skip-session", "完成诊断", emit, undefined, {
+      diagnosticAnswers: { experience: "A", understanding: "A", transfer: "B" },
+    });
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "skip-session.json"), "utf8")) as TutorState;
+    // concept-1 should be marked as known (high confidence skip)
+    assert.equal(state.roadmap[0].status, "known");
+    // concept-2 should NOT be marked as known (medium confidence)
+    assert.notEqual(state.roadmap[1].status, "known");
+    // activeConcept should point to concept-2 (index 1), the first non-known node
+    assert.equal(state.activeConcept, 1);
+    // Teaching trace should reference the second concept
+    const teachingTrace = events.find((event) => event.type === "reasoning.trace.ready");
+    assert.equal(teachingTrace?.type, "reasoning.trace.ready");
+    if (teachingTrace?.type === "reasoning.trace.ready") {
+      assert.match(teachingTrace.trace.currentGoal, /第二个概念/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
