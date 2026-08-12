@@ -7,7 +7,7 @@ import { TutorOrchestrator } from "./orchestrator.js";
 import { TutorStore } from "./store.js";
 import type { TopicModel, TutorEvent, TutorState, TutorTurnDecision } from "./types.js";
 import type { TutorModelClient } from "./model-client.js";
-import { normalizeTopicModel } from "./model-client.js";
+import { normalizeDiagnosis, normalizeTopicModel } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
 
 function fakeTopicModel(): TopicModel {
@@ -110,6 +110,34 @@ test("normalizes common model aliases before TopicModel validation", () => {
   assert.equal(normalized.rubricAnchors[0].transfer, "能迁移应用");
   assert.equal(normalized.subject.kind, "open-learning-subject");
   assert.deepEqual(normalized.capabilities.missing, []);
+});
+
+test("normalizes loose diagnosis shapes before TutorDiagnosis validation", () => {
+  const normalized = normalizeDiagnosis({
+    summary: "有一定基础",
+    learnerProfile: ["做过类似项目"],
+    evidence: [
+      "题干A -> 选项B",
+      { text: "题干C：选项D", meaning: "说明已有经验" },
+      { quote: "完整引用", implication: "可进入下一节点" },
+      {},
+    ],
+    skipSuggestions: [
+      { id: "concept-1", why: "答对了核心题", confidence: "high" },
+      { conceptId: "concept-2", reason: "有直觉", confidence: "medium" },
+      { reason: "缺少 conceptId，应丢弃" },
+    ],
+  }) as Record<string, any>;
+
+  assert.deepEqual(normalized.evidence, [
+    { quote: "题干A", implication: "选项B" },
+    { quote: "题干C：选项D", implication: "说明已有经验" },
+    { quote: "完整引用", implication: "可进入下一节点" },
+  ]);
+  assert.deepEqual(normalized.skipSuggestions, [
+    { conceptId: "concept-1", reason: "答对了核心题", confidence: "high" },
+    { conceptId: "concept-2", reason: "有直觉", confidence: "medium" },
+  ]);
 });
 
 test("upgrades legacy topic models without introducing a closed subject enum", () => {

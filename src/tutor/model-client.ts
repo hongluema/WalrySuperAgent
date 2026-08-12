@@ -156,10 +156,103 @@ const turnDecisionContract = {
   responsePlanFields: ["goal", "teachingAtom", "gapToRepair", "keyPoints", "allowedContent", "forbiddenContent", "question?"],
 };
 
+const diagnosisContract = {
+  requiredFields: ["summary", "learnerProfile", "evidence", "skipSuggestions"],
+  evidenceFields: ["quote", "implication"],
+  skipSuggestionFields: ["conceptId", "reason", "confidence: high|medium"],
+  notes: [
+    "evidence 必须是对象数组，不能是字符串数组；每项含 quote（引用具体题干与选项）与 implication（由此得出的判断）",
+    "skipSuggestions 每项必须含 conceptId（对应 conceptRoute[].id），不能用 id/nodeId 代替",
+  ],
+};
+
 function textValue(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return undefined;
+}
+
+function normalizeQuoteImplication(item: unknown): { quote: string; implication: string } | undefined {
+  if (typeof item === "string") {
+    const text = item.trim();
+    if (!text) return undefined;
+    const separators = ["：", ":", " -> ", " → ", " => ", " — ", " - "];
+    for (const separator of separators) {
+      const index = text.indexOf(separator);
+      if (index > 0 && index < text.length - separator.length) {
+        return {
+          quote: text.slice(0, index).trim(),
+          implication: text.slice(index + separator.length).trim(),
+        };
+      }
+    }
+    return { quote: text, implication: "诊断证据" };
+  }
+  if (!item || typeof item !== "object") return undefined;
+  const source = item as Record<string, any>;
+  const quote = textValue(source.quote)
+    ?? textValue(source.text)
+    ?? textValue(source.content)
+    ?? textValue(source.source)
+    ?? textValue(source.observation)
+    ?? textValue(source.evidence);
+  const implication = textValue(source.implication)
+    ?? textValue(source.meaning)
+    ?? textValue(source.reason)
+    ?? textValue(source.why)
+    ?? textValue(source.conclusion)
+    ?? textValue(source.inference);
+  if (!quote && !implication) return undefined;
+  return {
+    quote: quote ?? "诊断观察",
+    implication: implication ?? "诊断证据",
+  };
+}
+
+function normalizeSkipSuggestion(item: unknown): { conceptId: string; reason: string; confidence: "high" | "medium" } | undefined {
+  if (!item || typeof item !== "object") return undefined;
+  const source = item as Record<string, any>;
+  const conceptId = textValue(source.conceptId)
+    ?? textValue(source.concept_id)
+    ?? textValue(source.nodeId)
+    ?? textValue(source.node_id)
+    ?? textValue(source.id)
+    ?? textValue(source.concept)
+    ?? textValue(source.routeId);
+  if (!conceptId) return undefined;
+  const reason = textValue(source.reason)
+    ?? textValue(source.why)
+    ?? textValue(source.explanation)
+    ?? textValue(source.rationale)
+    ?? "诊断结果表明可能已掌握";
+  const rawConfidence = textValue(source.confidence)?.toLowerCase();
+  const confidence: "high" | "medium" = rawConfidence === "high" || rawConfidence === "高" ? "high" : "medium";
+  return { conceptId, reason, confidence };
+}
+
+export function normalizeDiagnosis(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, any>;
+  const learnerProfileRaw = source.learnerProfile ?? source.profile ?? source.traits ?? [];
+  const evidenceRaw = source.evidence ?? source.evidences ?? source.observations ?? [];
+  const skipRaw = source.skipSuggestions ?? source.skips ?? source.knownConcepts ?? source.skipNodes ?? [];
+
+  const evidence = (Array.isArray(evidenceRaw) ? evidenceRaw : [])
+    .map((item) => normalizeQuoteImplication(item))
+    .filter((item): item is { quote: string; implication: string } => Boolean(item));
+
+  const skipSuggestions = (Array.isArray(skipRaw) ? skipRaw : [])
+    .map((item) => normalizeSkipSuggestion(item))
+    .filter((item): item is { conceptId: string; reason: string; confidence: "high" | "medium" } => Boolean(item));
+
+  return {
+    summary: textValue(source.summary) ?? textValue(source.diagnosis) ?? textValue(source.overview) ?? "已根据诊断答案形成学习起点",
+    learnerProfile: Array.isArray(learnerProfileRaw)
+      ? learnerProfileRaw.map((item: any) => textValue(item) ?? (item && typeof item === "object" ? JSON.stringify(item) : "")).filter(Boolean)
+      : [],
+    evidence,
+    skipSuggestions,
+  };
 }
 
 export function normalizeTopicModel(value: unknown): unknown {
@@ -299,14 +392,17 @@ export class AiTutorModelClient implements TutorModelClient {
       model: this.model,
       schema: diagnosisSchema,
       signal,
-      contract: { requiredFields: ["summary", "learnerProfile", "evidence", "skipSuggestions"] },
+      contract: diagnosisContract,
+      normalize: normalizeDiagnosis,
       system: [
         "你是通用私教的诊断编译器，只处理已经完成的结构化诊断答案。",
         "每条判断必须引用具体题目和所选选项，不能把已作答诊断解释成不知道或没有证据。",
         "诊断只描述学习起点，不要讲课程内容，也不要生成教学计划。",
         "学习对象是开放的；忠于用户目标，不根据类型擅自扩大课程范围。",
         "根据诊断答案，判断路线中哪些节点学习者可能已掌握，输出 skipSuggestions 数组。对于高置信度的判断（学习者明确答对核心概念题），confidence 标记为 high；对于中等置信度的判断（有一定直觉但未验证），标记为 medium。如果没有可跳过的节点，返回空数组。",
-        `必须严格遵守字段要求：${JSON.stringify({ requiredFields: ["summary", "learnerProfile", "evidence", "skipSuggestions"] })}`,
+        "evidence 必须是 { quote, implication } 对象数组，禁止输出字符串数组。",
+        "skipSuggestions 每项必须是 { conceptId, reason, confidence }，conceptId 必须对应 conceptRoute 中的 id。",
+        `必须严格遵守字段要求：${JSON.stringify(diagnosisContract)}`,
       ].join("\n"),
       prompt: JSON.stringify({ answeredDiagnostics: input.answeredDiagnostics, topic: formatTopicContext(input.topicModel), currentState: input.state }),
     });
