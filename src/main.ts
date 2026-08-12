@@ -5,12 +5,6 @@ import { type ModelMessage } from "ai"; // AI SDK 的消息类型定义
 import { createOpenAI } from "@ai-sdk/openai"; // 创建 OpenAI 兼容的模型提供者
 import { createMockModel } from "./mock-model.js"; // 无 API Key 时使用的假模型（离线测试）
 import { createInterface } from "node:readline"; // 命令行交互界面（REPL 输入）
-// ---------- TODO:代理配置 start---------- 
-import { getProxiedFetch, installHttpProxy } from "./net/http-proxy.js";
-
-installHttpProxy();
-// ---------- TODO:代理配置 end----------
-
 // ===== Agent 核心循环与会话 =====
 import { agentLoop } from "./agent/loop.js"; // Agent 主循环：模型调用 + 工具执行的循环驱动
 import { allTools } from "./tools/index.js"; // 内置工具集合（文件、命令等）
@@ -111,13 +105,7 @@ const model: any = apiKey ? qwen.chat("qwen-plus-latest") : createMockModel();
 /* 按配置读取 */
 function createModel(cfg: SuperAgentConfig["model"]) {
   if (!cfg.apiKey) return createMockModel();
-  // ---------- TODO:代理配置 start---------- 
-  const provider = createOpenAI({
-    baseURL: cfg.baseURL,
-    apiKey: cfg.apiKey,
-    fetch: getProxiedFetch(),
-  });
-  // ---------- TODO:代理配置 end---------- 
+  const provider = createOpenAI({ baseURL: cfg.baseURL, apiKey: cfg.apiKey });
   return provider.chat(cfg.name);
 }
 const model = createModel(config.model);

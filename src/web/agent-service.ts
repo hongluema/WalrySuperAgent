@@ -10,19 +10,12 @@ import {
 } from "../context/prompt-builder.js";
 import { loadConfig } from "../config/loader.js";
 import type { SuperAgentConfig } from "../config/schema.js";
-// ---------- TODO:代理配置 start---------- 
-import { getProxiedFetch, installHttpProxy } from "../net/http-proxy.js";
-// ---------- TODO:代理配置 end---------- 
 import { calculatorTool, weatherTool } from "../tools/utility-tools.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { TutorOrchestrator } from "../tutor/orchestrator.js";
 import type { TutorEvent, VisibleReasoningTrace } from "../tutor/types.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
 import { AiTutorModelClient } from "../tutor/model-client.js";
-
-// ---------- TODO:代理配置 start---------- 
-installHttpProxy();
-// ---------- TODO:代理配置 end---------- 
 
 export interface WebAgentRunInput {
   conversationId: string;
@@ -44,9 +37,6 @@ function createModel(config: SuperAgentConfig["model"]): any {
   const provider = createOpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
-    // ---------- TODO:代理配置 start---------- 
-    fetch: getProxiedFetch(),
-    // ---------- TODO:代理配置 end---------- 
   });
   return provider.chat(config.name);
 }
