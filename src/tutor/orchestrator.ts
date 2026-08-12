@@ -132,12 +132,7 @@ export class TutorOrchestrator {
       state.messages.push({ role: "user", content: message });
       let topicModel = state.topicModel ? ensureTopicModelDefaults(state.topicModel) : undefined;
 
-      const isNewTopic = !topicModel || (
-        state.phase !== "idle" &&
-        isSystematicLearningIntent(message) &&
-        !isDirectHelpRequest(message) &&
-        !Object.keys(options.diagnosticAnswers ?? {}).length
-      );
+      const isNewTopic = !topicModel;
 
       if (isNewTopic) {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });

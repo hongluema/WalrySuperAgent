@@ -225,7 +225,7 @@ test("any topic uses the same dynamic diagnostic protocol", async () => {
   }
 });
 
-test("switching topics rebuilds a dynamic topic model", async () => {
+test("mid-session message does not rebuild topic model", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-switch-test-"));
   try {
     const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient());
@@ -236,13 +236,11 @@ test("switching topics rebuilds a dynamic topic model", async () => {
     events.length = 0;
     await tutor.run("switch-session", "我想学习写作", emit);
 
+    // Should NOT rebuild topic model — stays in current diagnose flow
     const model = events.find((event) => event.type === "topic.model.ready");
-    assert.equal(model?.type, "topic.model.ready");
-    if (model?.type === "topic.model.ready") assert.equal(model.topic, "any-topic");
-    assert.deepEqual(
-      events.filter((event) => event.type === "diagnostic.card.ready").map((event) => event.card.index),
-      [0],
-    );
+    assert.equal(model, undefined);
+    // Should advance diagnostic card instead
+    assert.ok(events.some((event) => event.type === "diagnostic.card.ready"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
