@@ -22,6 +22,7 @@
     "dotenv": "16.5.0",
     "hono": "4.7.10",
     "turndown": "^7.2.4",
+    "undici": "^6.21.3",
     "zod": "3.25.76"
   },
   "devDependencies": {
