@@ -3,6 +3,8 @@ import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecis
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
+import { pickSearchTool } from "../tools/web-search.js";
+import { truncateResult } from "../tools/registry.js";
 
 const phaseLabels = {
   research: "正在建立学习对象与能力模型",
@@ -51,9 +53,31 @@ function firstTeachingDecision(model: TopicModel, diagnosisSummary: string, star
       teachingAtom: first?.title ?? "第一个节点",
       gapToRepair: first?.target ?? "尚未获得当前节点的学习证据",
       keyPoints: first ? [first.target] : [model.coreOutcome],
-      allowedContent: [first?.title ?? "当前节点", first?.target ?? model.coreOutcome],
+      allowedContent: first ? [first.title, first.target] : [model.coreOutcome],
       forbiddenContent: next ? [`后续节点：${next.title}`, "完整课程讲解"] : ["完整课程讲解"],
-      question: first ? `结合你的理解，你认为“${first.title}”最关键的区别或机制是什么？` : "你目前对这个主题的理解是什么？",
+      question: first ? `根据刚才介绍的内容，你认为“${first.title}”最关键的区别、机制或作用是什么？` : "你目前对这个主题的理解是什么？",
+    },
+  };
+}
+
+function fallbackTurnDecision(message: string, model: TopicModel, activeConcept: number): TutorTurnDecision {
+  const current = model.conceptRoute[activeConcept] ?? model.conceptRoute[0];
+  const next = model.conceptRoute[activeConcept + 1];
+  return {
+    intent: "clarification",
+    understoodMeaning: "已收到用户回答，但本轮自动评估未完成",
+    evidence: [{ quote: message, implication: "保留用户原话，暂不据此更新掌握状态" }],
+    assessment: { status: "not-answered", rubricEvidence: [], evidence: [] },
+    nextAction: "ask-clarification",
+    statePatch: {},
+    responsePlan: {
+      goal: `保持“${current?.title ?? "当前概念"}”的学习进度并继续对话`,
+      teachingAtom: current?.title ?? "当前概念",
+      gapToRepair: "本轮自动评估暂时不可用",
+      keyPoints: current ? [current.target] : [model.coreOutcome],
+      allowedContent: current ? [current.title, current.target] : [model.coreOutcome],
+      forbiddenContent: next ? [`后续节点：${next.title}`, "完整课程讲解"] : ["完整课程讲解"],
+      question: `你可以再用一句话说明，你认为“${current?.title ?? "当前概念"}”为什么会产生这种结果吗？`,
     },
   };
 }
@@ -98,6 +122,12 @@ export class TutorOrchestrator {
   constructor(
     private readonly store = new TutorStore(),
     private readonly modelClient?: TutorModelClient,
+    private readonly search = async (query: string) => {
+      const tool = pickSearchTool();
+      const result = await tool.execute({ query, max_results: 5 });
+      const text = typeof result === "string" ? result : JSON.stringify(result);
+      return truncateResult(text, tool.maxResultChars);
+    },
   ) {}
 
   async hasActiveSession(conversationId: string): Promise<boolean> {
@@ -107,6 +137,17 @@ export class TutorOrchestrator {
 
   isTutorIntent(message: string): boolean {
     return isSystematicLearningIntent(message);
+  }
+
+  private async decide(message: string, state: TutorState, topicModel: TopicModel, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
+    try {
+      return await this.modelClient!.analyzeTurn({ message, state, topicModel }, signal);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "模型决策失败";
+      console.error("[Tutor] 教学决策降级", error);
+      await emit({ type: "model.degraded", stage: "decision", reason });
+      return fallbackTurnDecision(message, topicModel, state.activeConcept);
+    }
   }
 
   async run(
@@ -136,7 +177,40 @@ export class TutorOrchestrator {
 
       if (isNewTopic) {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });
-        topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({ userGoal: message, history: state.messages }, signal));
+        let researchMaterial: string | undefined;
+        const researchQuery = `${message} 背景 核心内容 结构`;
+        try {
+          const result = await this.search(researchQuery);
+          const text = typeof result === "string" ? result.trim() : JSON.stringify(result);
+          if (text && !text.startsWith("[web_search]") && text !== "没有找到相关结果") {
+            researchMaterial = text;
+          } else {
+            await emit({ type: "grounding.degraded", reason: text || "搜索没有返回可用内容" });
+          }
+        } catch (error) {
+          await emit({ type: "grounding.degraded", reason: error instanceof Error ? error.message : "搜索失败" });
+        }
+        topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({
+          userGoal: message,
+          history: state.messages,
+          materials: researchMaterial ? [researchMaterial] : [],
+        }, signal));
+        if (researchMaterial) {
+          const urls = [...new Set(researchMaterial.match(/https?:\/\/\S+/g) ?? [])];
+          topicModel.grounding = {
+            mode: "web-search",
+            sources: (urls.length ? urls : [researchQuery]).map((label) => ({ label, verified: true })),
+            limitations: [],
+          };
+          topicModel.evidenceSources = topicModel.grounding.sources.map((source) => source.label);
+        } else {
+          topicModel.grounding = {
+            mode: "model-knowledge",
+            sources: [],
+            limitations: ["真实搜索未取得可用内容，本次课程使用模型已有知识，可能不完整"],
+          };
+          topicModel.evidenceSources = [];
+        }
         state.topicModel = topicModel;
         state.topic = topicModel.topic;
         state.lessonTitle = topicModel.lessonTitle;
@@ -147,13 +221,13 @@ export class TutorOrchestrator {
         state.activeConcept = 0;
         state.phase = "research";
         const verifiedSourceCount = topicModel.grounding.sources.filter((source) => source.verified).length;
-        if (verifiedSourceCount > 0) await emit({ type: "research.completed", sourceCount: verifiedSourceCount, researchedAt: new Date().toISOString() });
+        if (researchMaterial && verifiedSourceCount > 0) await emit({ type: "research.completed", sourceCount: verifiedSourceCount, researchedAt: new Date().toISOString() });
         await emit({ type: "topic.model.ready", title: topicModel.lessonTitle, outcome: topicModel.coreOutcome, topic: topicModel.topic });
 
         if (isDirectHelpRequest(message)) {
           state.phase = "teach";
           await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
-          const decision = await this.modelClient.analyzeTurn({ message, state, topicModel }, signal);
+          const decision = await this.decide(message, state, topicModel, emit, signal);
           state.lastDecision = decision;
           await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, topicModel, decision, ["用户明确要求直接回答", `动态主题：${topicModel.lessonTitle}`]) });
           await this.streamResponse(state, topicModel, decision, message, emit, signal);
@@ -217,21 +291,6 @@ export class TutorOrchestrator {
           answeredDiagnostics: answeredDiagnostics(state),
         }, signal);
 
-        // Apply skipSuggestions: mark high-confidence known nodes
-        for (const skip of diagnosis.skipSuggestions ?? []) {
-          if (skip.confidence !== "high") continue;
-          const idx = state.roadmap.findIndex(n => n.id === skip.conceptId);
-          if (idx >= 0 && (state.roadmap[idx].status === "locked" || state.roadmap[idx].status === "active")) {
-            state.roadmap[idx].status = "known";
-          }
-        }
-        // Find first non-known/mastered node as start point
-        const startIndex = state.roadmap.findIndex(n => n.status !== "known" && n.status !== "mastered");
-        if (startIndex >= 0) {
-          state.activeConcept = startIndex;
-          state.roadmap[startIndex].status = "active";
-        }
-
         const decision = firstTeachingDecision(topicModel, diagnosis.summary, state.activeConcept);
         state.learnerProfile = diagnosis.learnerProfile;
         state.lastDecision = decision;
@@ -247,7 +306,7 @@ export class TutorOrchestrator {
       }
 
       state.turnCount += 1;
-      const decision = await this.modelClient.analyzeTurn({ message, state, topicModel }, signal);
+      const decision = await this.decide(message, state, topicModel, emit, signal);
       state.lastDecision = decision;
       this.applyStatePatch(state, topicModel, decision);
       await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, topicModel, decision, decision.evidence.map((item) => `${item.quote}：${item.implication}`)) });
@@ -303,11 +362,23 @@ export class TutorOrchestrator {
   private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
     if (!this.modelClient) throw new Error("Tutor 模型客户端未配置");
     let text = "";
-    await this.modelClient.streamResponse({ message, state, topicModel: model, decision }, async (delta) => {
-      if (signal?.aborted) throw new Error("请求已取消");
-      text += delta;
-      await emit({ type: "message.delta", text: delta });
-    }, signal);
+    try {
+      await this.modelClient.streamResponse({ message, state, topicModel: model, decision }, async (delta) => {
+        if (signal?.aborted) throw new Error("请求已取消");
+        text += delta;
+        await emit({ type: "message.delta", text: delta });
+      }, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const reason = error instanceof Error ? error.message : "模型回答失败";
+      console.error("[Tutor] 教学回答降级", error);
+      await emit({ type: "model.degraded", stage: "response", reason });
+      const fallback = text
+        ? "\n\n这次回答没有完整生成，你的学习进度已保留。请再发送一次，我会从当前节点继续。"
+        : "我已收到你的回答，但这次讲解没有成功生成。你的学习进度已保留，请再发送一次，我会从当前节点继续。";
+      text += fallback;
+      await emit({ type: "message.delta", text: fallback });
+    }
     if (text) state.messages.push({ role: "assistant", content: text });
   }
 

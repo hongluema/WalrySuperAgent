@@ -206,6 +206,8 @@ export type TutorEvent =
   | { type: "run.started"; runId: string; conversationId: string }
   | { type: "tutor.phase.changed"; phase: TutorPhase; label: string }
   | { type: "research.completed"; sourceCount: number; researchedAt: string }
+  | { type: "grounding.degraded"; reason: string }
+  | { type: "model.degraded"; stage: "decision" | "response"; reason: string }
   | { type: "topic.model.ready"; title: string; outcome: string; topic: string }
   | { type: "diagnostic.cards.ready"; cards: DiagnosticCard[] }
   | { type: "diagnostic.card.ready"; card: DiagnosticCard }

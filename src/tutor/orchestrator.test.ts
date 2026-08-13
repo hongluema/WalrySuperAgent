@@ -22,8 +22,8 @@ function fakeTopicModel(): TopicModel {
       { id: "transfer", tab: "迁移验证", question: "如何验证？", options: [{ id: "A", label: "用新场景验证" }, { id: "B", label: "不知道" }] },
     ],
     conceptRoute: [
-      { id: "concept-1", title: "第一个概念", target: "理解第一个概念" },
-      { id: "concept-2", title: "第二个概念", target: "迁移到新场景" },
+      { id: "concept-1", title: "第一个概念", target: "介绍第一个概念的背景、定义和核心内容" },
+      { id: "concept-2", title: "第二个概念", target: "介绍第二个概念并迁移到新场景" },
     ],
     boundaryCases: ["概念理解不等于能够迁移"],
     practiceTarget: "完成一个真实小任务",
@@ -154,7 +154,7 @@ test("upgrades legacy topic models without introducing a closed subject enum", (
 test("runs the diagnostic journey and persists resumable state", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-tutor-test-"));
   try {
-    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient());
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
     const events: TutorEvent[] = [];
     const emit = (event: TutorEvent): void => {
       events.push(event);
@@ -201,10 +201,111 @@ test("runs the diagnostic journey and persists resumable state", async () => {
   }
 });
 
+test("uses real search material before building a grounded topic model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-grounding-test-"));
+  try {
+    const client = fakeModelClient();
+    let receivedMaterials: string[] = [];
+    client.buildTopicModel = async ({ materials }) => {
+      receivedMaterials = materials ?? [];
+      const model = fakeTopicModel();
+      model.grounding = {
+        mode: "model-knowledge",
+        sources: [{ label: "用户只提供了主题名", verified: true }],
+        limitations: [],
+      };
+      return model;
+    };
+    const searchQueries: string[] = [];
+    const tutor = new TutorOrchestrator(
+      new TutorStore(root),
+      client,
+      async (query) => {
+        searchQueries.push(query);
+        return "### 权威资料\nhttps://example.com/source\n真实搜索取得的背景与核心内容";
+      },
+    );
+    const events: TutorEvent[] = [];
+
+    await tutor.run("grounded-session", "我想学习一部具体作品", (event) => { events.push(event); });
+
+    assert.deepEqual(searchQueries, ["我想学习一部具体作品 背景 核心内容 结构"]);
+    assert.equal(receivedMaterials.length, 1);
+    assert.match(receivedMaterials[0], /真实搜索取得/);
+    assert.ok(events.some((event) => event.type === "research.completed"));
+    assert.equal(events.some((event) => event.type === "grounding.degraded"), false);
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "grounded-session.json"), "utf8")) as TutorState;
+    assert.equal(state.topicModel?.grounding.mode, "web-search");
+    assert.deepEqual(state.topicModel?.grounding.sources, [{ label: "https://example.com/source", verified: true }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("degrades explicitly when required search returns no usable content", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-grounding-failure-test-"));
+  try {
+    const client = fakeModelClient();
+    let receivedMaterials: string[] = [];
+    client.buildTopicModel = async ({ materials }) => {
+      receivedMaterials = materials ?? [];
+      return fakeTopicModel();
+    };
+    const tutor = new TutorOrchestrator(
+      new TutorStore(root),
+      client,
+      async () => "[web_search] 未配置 TAVILY_API_KEY，请在 .env 中设置",
+    );
+    const events: TutorEvent[] = [];
+
+    await tutor.run("degraded-session", "我想学习一部具体作品", (event) => { events.push(event); });
+
+    assert.deepEqual(receivedMaterials, []);
+    assert.ok(events.some((event) => event.type === "grounding.degraded"));
+    assert.equal(events.some((event) => event.type === "research.completed"), false);
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "degraded-session.json"), "utf8")) as TutorState;
+    assert.equal(state.topicModel?.grounding.mode, "model-knowledge");
+    assert.equal(state.topicModel?.grounding.sources.length, 0);
+    assert.match(state.topicModel?.grounding.limitations[0] ?? "", /真实搜索未取得/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("starts story nodes with grounded content instead of asking for unknown facts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-story-first-test-"));
+  try {
+    const client = fakeModelClient();
+    const model = fakeTopicModel();
+    model.conceptRoute[0] = {
+      ...model.conceptRoute[0],
+      title: "故事背景",
+      target: "先介绍故事发生的背景、关键人物，以及这段故事如何引出主题",
+    };
+    client.buildTopicModel = async () => model;
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
+
+    await tutor.run("story-session", "我想学习一部作品", () => {});
+    await tutor.run("story-session", "完成诊断", () => {}, undefined, {
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+    });
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "story-session.json"), "utf8")) as TutorState;
+    assert.deepEqual(state.lastDecision?.responsePlan.keyPoints, [
+      "先介绍故事发生的背景、关键人物，以及这段故事如何引出主题",
+    ]);
+    assert.match(state.lastDecision?.responsePlan.question ?? "", /根据刚才介绍的内容/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("any topic uses the same dynamic diagnostic protocol", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-writing-test-"));
   try {
-    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient());
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
     const events: TutorEvent[] = [];
     const emit = (event: TutorEvent): void => { events.push(event); };
 
@@ -228,7 +329,7 @@ test("any topic uses the same dynamic diagnostic protocol", async () => {
 test("mid-session message does not rebuild topic model", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-switch-test-"));
   try {
-    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient());
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
     const events: TutorEvent[] = [];
     const emit = (event: TutorEvent): void => { events.push(event); };
 
@@ -265,7 +366,7 @@ test("does not mark a node mastered without sufficient evidence in all core crit
       statePatch: { masteredConceptId: "concept-1" },
       nextAction: "advance-concept",
     });
-    const tutor = new TutorOrchestrator(new TutorStore(root), client);
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
     const emit = (): void => {};
 
     await tutor.run("mastery-session", "我想学习一个全新的对象", emit);
@@ -285,7 +386,38 @@ test("does not mark a node mastered without sufficient evidence in all core crit
   }
 });
 
-test("skipSuggestions marks known nodes and teaching starts at correct node", async () => {
+test("degrades model failures without failing or losing the teaching turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-model-fallback-test-"));
+  try {
+    const client = fakeModelClient();
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
+
+    await tutor.run("fallback-session", "我想学习一个全新的对象", () => {});
+    await tutor.run("fallback-session", "完成诊断", () => {}, undefined, {
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+    });
+
+    client.analyzeTurn = async () => { throw new Error("结构化输出校验失败"); };
+    client.streamResponse = async () => { throw new Error("模型暂时不可用"); };
+    const events: TutorEvent[] = [];
+    await tutor.run("fallback-session", "我认为关键在于现金流方向", (event) => { events.push(event); });
+
+    assert.ok(events.some((event) => event.type === "model.degraded" && event.stage === "decision"));
+    assert.ok(events.some((event) => event.type === "model.degraded" && event.stage === "response"));
+    assert.ok(events.some((event) => event.type === "message.delta"));
+    assert.ok(events.some((event) => event.type === "state.saved"));
+    assert.ok(events.some((event) => event.type === "run.completed"));
+    assert.equal(events.some((event) => event.type === "run.failed"), false);
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "fallback-session.json"), "utf8")) as TutorState;
+    assert.equal(state.turnCount, 1);
+    assert.match(String(state.messages.at(-1)?.content), /学习进度已保留/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("diagnostic suggestions do not skip content nodes", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-skip-test-"));
   try {
     const client = fakeModelClient();
@@ -298,7 +430,7 @@ test("skipSuggestions marks known nodes and teaching starts at correct node", as
         { conceptId: "concept-2", reason: "用户有一定直觉但未验证", confidence: "medium" as const },
       ],
     });
-    const tutor = new TutorOrchestrator(new TutorStore(root), client);
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
     const events: TutorEvent[] = [];
     const emit = (event: TutorEvent): void => { events.push(event); };
 
@@ -309,18 +441,38 @@ test("skipSuggestions marks known nodes and teaching starts at correct node", as
     });
 
     const state = JSON.parse(await readFile(join(root, "sessions", "skip-session.json"), "utf8")) as TutorState;
-    // concept-1 should be marked as known (high confidence skip)
-    assert.equal(state.roadmap[0].status, "known");
-    // concept-2 should NOT be marked as known (medium confidence)
-    assert.notEqual(state.roadmap[1].status, "known");
-    // activeConcept should point to concept-2 (index 1), the first non-known node
-    assert.equal(state.activeConcept, 1);
-    // Teaching trace should reference the second concept
+    assert.equal(state.roadmap[0].status, "active");
+    assert.equal(state.activeConcept, 0);
     const teachingTrace = events.find((event) => event.type === "reasoning.trace.ready");
     assert.equal(teachingTrace?.type, "reasoning.trace.ready");
     if (teachingTrace?.type === "reasoning.trace.ready") {
-      assert.match(teachingTrace.trace.currentGoal, /第二个概念/);
+      assert.match(teachingTrace.trace.currentGoal, /第一个概念/);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("does not skip a core node from diagnostic multiple-choice answers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-core-node-test-"));
+  try {
+    const client = fakeModelClient();
+    client.compileDiagnosis = async () => ({
+      summary: "学习者答对了核心概念选择题",
+      learnerProfile: [],
+      evidence: [],
+      skipSuggestions: [{ conceptId: "concept-1", reason: "选择题正确", confidence: "high" as const }],
+    });
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
+
+    await tutor.run("core-node-session", "我想学习一个核心主题", () => {});
+    await tutor.run("core-node-session", "完成诊断", () => {}, undefined, {
+      diagnosticAnswers: { experience: "A", understanding: "A", transfer: "A" },
+    });
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "core-node-session.json"), "utf8")) as TutorState;
+    assert.equal(state.roadmap[0].status, "active");
+    assert.equal(state.activeConcept, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

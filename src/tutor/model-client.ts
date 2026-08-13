@@ -1,4 +1,4 @@
-import { generateText, streamText } from "ai";
+import { generateObject, generateText, streamText } from "ai";
 import { z } from "zod";
 import type { ModelMessage } from "ai";
 import type { TopicModel, TutorDiagnosis, TutorTurnDecision, TutorState } from "./types.js";
@@ -375,6 +375,9 @@ export class AiTutorModelClient implements TutorModelClient {
         "不要把学习对象归入封闭类型枚举；subject.kind 是开放标签。请按知识取得、内容组织、教学互动、掌握验证四组能力描述任务。",
         "忠于用户原始学习对象和目标，不得擅自扩张成更大的领域课程、考试课或项目课。",
         "只有真实提供或检索到的来源 verified 才能为 true；模型已有知识不是已验证研究。",
+        "materials 非空时，它们是真实取得的搜索结果或用户材料。课程背景、核心内容、路线和例子必须优先以 materials 为依据，不得只凭模型记忆另起一套内容。",
+        "每个路线节点的 target 必须写出进入教学时要介绍的具体背景、核心内容或例子，不能只写‘理解某概念’之类的抽象目标。",
+        "核心概念必须在节点标题中明确出现，不能藏在‘基础知识’‘重要性’等泛化标题下。",
         "诊断问题从既往经验、概念理解、边界辨析、迁移能力等维度中，选择 2-4 个对当前主题最有区分度的维度出题，不需要凑满所有维度。",
         "至少一题要求用户完成真实判断，不要全部使用自我评价题，也不要在诊断前泄露答案。",
         `路线节点必须是学习对象本身的知识/内容节点。判断标准：去掉这个节点后，学习者对该领域的理解是否有实质缺失？\u201C明确学习目标\u201D\u201C批判性思考\u201D\u201C形成应用清单\u201D等属于教学技法，应融入内容节点的教学过程，不作为独立节点。`,
@@ -399,7 +402,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "每条判断必须引用具体题目和所选选项，不能把已作答诊断解释成不知道或没有证据。",
         "诊断只描述学习起点，不要讲课程内容，也不要生成教学计划。",
         "学习对象是开放的；忠于用户目标，不根据类型擅自扩大课程范围。",
-        "根据诊断答案，判断路线中哪些节点学习者可能已掌握，输出 skipSuggestions 数组。对于高置信度的判断（学习者明确答对核心概念题），confidence 标记为 high；对于中等置信度的判断（有一定直觉但未验证），标记为 medium。如果没有可跳过的节点，返回空数组。",
+        "当前诊断是选择题，只用于判断讲解深浅，不能证明完整掌握一个内容节点。skipSuggestions 返回空数组。",
         "evidence 必须是 { quote, implication } 对象数组，禁止输出字符串数组。",
         "skipSuggestions 每项必须是 { conceptId, reason, confidence }，conceptId 必须对应 conceptRoute 中的 id。",
         `必须严格遵守字段要求：${JSON.stringify(diagnosisContract)}`,
@@ -410,11 +413,20 @@ export class AiTutorModelClient implements TutorModelClient {
 
   async analyzeTurn(input: { message: string; state: TutorState; topicModel: TopicModel }, signal?: AbortSignal): Promise<TutorTurnDecision> {
     const activeConcept = input.topicModel.conceptRoute[input.state.activeConcept] ?? input.topicModel.conceptRoute[0];
-    return generateJson({
+    const activeRubric = input.topicModel.rubricAnchors.find((item) => item.conceptId === activeConcept?.id);
+    const nodeState = activeConcept ? input.state.nodeLearningStates[activeConcept.id] : undefined;
+    const lastAssistantMessage = [...input.state.messages].reverse().find((item) => item.role === "assistant");
+    const timeoutSignal = AbortSignal.timeout(45_000);
+    const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const result = await generateObject({
       model: this.model,
       schema: turnDecisionSchema,
-      signal,
-      contract: turnDecisionContract,
+      schemaName: "TutorTurnDecision",
+      schemaDescription: "对学习者本轮回答的判断，以及下一步唯一教学动作",
+      mode: "json",
+      maxRetries: 0,
+      abortSignal,
+      providerOptions: { openai: { structuredOutputs: false } },
       system: [
         "你是通用私教的教学决策器。你现在只生成 TutorTurnDecision JSON，不要直接回答用户。",
         "特别区分：回答、不知道、反驳老师、请求澄清、要求直接讲解和切换主题。",
@@ -422,27 +434,36 @@ export class AiTutorModelClient implements TutorModelClient {
         "只有用户提供了与当前 rubric 相关的可观察证据，才能评估为 partial 或 mastered。",
         "必须引用用户原话并分别记录准确、解释、辨析、迁移或实操证据；没有对应证据不得假定掌握。",
         "每轮只选择一个 teachingAtom，只修复一个 gapToRepair。allowedContent 必须足够窄，forbiddenContent 要阻止提前教授后续节点。",
+        "不得要求学习者猜来源专属事实。人物、历史、作品情节等节点要先介绍 activeConcept.target 中的具体内容，再询问其意义或机制。",
         "不要凭固定关键词评分，不要假设用户接受了老师上一轮判断。",
         `必须严格遵守以下字段结构，字段名和值类型不能改变：${JSON.stringify(turnDecisionContract)}`,
         "只输出符合 schema 的结构化对象。",
       ].join("\n"),
       prompt: JSON.stringify({
         userMessage: input.message,
-        currentState: input.state,
-        topicModel: input.topicModel,
+        lastAssistantMessage: lastAssistantMessage?.content ?? "",
         activeConcept,
+        activeRubric,
+        currentEvidence: nodeState?.evidence ?? [],
+        currentMisconceptions: nodeState?.misconceptions ?? [],
+        learnerProfile: input.state.learnerProfile,
       }),
     });
+    return result.object;
   }
 
   async streamResponse(input: { message: string; state: TutorState; topicModel: TopicModel; decision: TutorTurnDecision }, onDelta: (text: string) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
+    const timeoutSignal = AbortSignal.timeout(45_000);
+    const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     const result = streamText({
       model: this.model,
-      abortSignal: signal,
+      abortSignal,
+      maxRetries: 0,
       system: [
         "你是一个专业、耐心、使用苏格拉底式引导的通用私教。",
         "根据教学决策生成自然语言回答，不要暴露隐藏推理过程。",
         "先回应用户当前真实意图，再给最小必要解释或例子，最后只问一个核心问题。",
+        "首次进入节点时，先完整讲清 decision.responsePlan.keyPoints 中的必要背景和核心内容，再提问；最小解释不能省略理解当前节点所需的因果链。",
         "严格执行 decision.responsePlan：只讲 teachingAtom 和 allowedContent，不得输出 forbiddenContent，不得一次总结整门课程。",
         "正文原则上不超过 600 个中文字符。",
         "如果用户表示不知道，降低难度并给例子；如果用户反驳，先承认并澄清，不要强行评价。",
@@ -451,7 +472,10 @@ export class AiTutorModelClient implements TutorModelClient {
         userMessage: input.message,
         topic: formatTopicContext(input.topicModel),
         decision: input.decision,
-        currentState: input.state,
+        learnerProfile: input.state.learnerProfile,
+        currentNodeState: input.topicModel.conceptRoute[input.state.activeConcept]
+          ? input.state.nodeLearningStates[input.topicModel.conceptRoute[input.state.activeConcept].id]
+          : undefined,
       }),
     });
     let text = "";
