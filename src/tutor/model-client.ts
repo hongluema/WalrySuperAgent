@@ -605,7 +605,7 @@ export class AiTutorModelClient implements TutorModelClient {
     const nodeState = activeConcept ? input.state.nodeLearningStates[activeConcept.id] : undefined;
     const lastAssistantMessage = [...input.state.messages].reverse().find((item) => item.role === "assistant");
     const lastQuestion = nodeState?.questionsAsked.at(-1) || lastAssistantMessage?.content || "";
-    const timeoutSignal = AbortSignal.timeout(90_000);
+    const timeoutSignal = AbortSignal.timeout(180_000);
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     const { value, thinking } = await streamThinkThenJson({
       model: this.model,
@@ -642,7 +642,7 @@ export class AiTutorModelClient implements TutorModelClient {
   }
 
   async streamResponse(input: { message: string; state: TutorState; topicModel: TopicModel; decision: TutorTurnDecision }, onDelta: (text: string) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
-    const timeoutSignal = AbortSignal.timeout(90_000);
+    const timeoutSignal = AbortSignal.timeout(180_000);
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     const activeConcept = input.topicModel.conceptRoute[input.state.activeConcept];
     const nodeState = activeConcept ? input.state.nodeLearningStates[activeConcept.id] : undefined;
