@@ -1,4 +1,4 @@
-import { generateObject, generateText, streamText } from "ai";
+import { generateText, streamText } from "ai";
 import { z } from "zod";
 import type { ModelMessage } from "ai";
 import type { TopicModel, TutorDiagnosis, TutorTurnDecision, TutorState } from "./types.js";
@@ -51,6 +51,17 @@ const topicModelSchema = z.object({
   capabilities: capabilityPlanSchema,
 });
 
+const pedagogySchema = z.object({
+  hit: z.string(),
+  unpunched: z.string(),
+  invented: z.string(),
+  nextLayer: z.string(),
+  sourceMove: z.string(),
+  nextQuestion: z.string(),
+  questionPurpose: z.enum(["accurate", "explained", "discrimination", "transfer", "performance", "introduce"]),
+  restatedBiography: z.boolean(),
+});
+
 const turnDecisionSchema = z.object({
   intent: z.enum(["answer", "dont_know", "disagreement", "clarification", "direct_answer_request", "topic_switch", "meta_question", "stop"]),
   understoodMeaning: z.string(),
@@ -76,6 +87,7 @@ const turnDecisionSchema = z.object({
     forbiddenContent: z.array(z.string()),
     question: z.string().optional(),
   }),
+  pedagogy: pedagogySchema.optional(),
 });
 
 const diagnosisSchema = z.object({
@@ -99,6 +111,7 @@ export type TutorModelClient = {
     message: string;
     state: TutorState;
     topicModel: TopicModel;
+    onThinking?: (text: string) => Promise<void> | void;
   }, signal?: AbortSignal): Promise<TutorTurnDecision>;
   compileDiagnosis(input: {
     state: TutorState;
@@ -135,6 +148,39 @@ function extractJson(text: string): string {
   return withoutFence.slice(start, end + 1);
 }
 
+const bannedQuestionPattern = /最关键的区别|机制或作用是什么|再用一句话说明|为什么会产生这种结果|根据刚才介绍的内容/;
+
+export function isBannedQuestion(question: string | undefined): boolean {
+  return Boolean(question && bannedQuestionPattern.test(question));
+}
+
+export function splitThinkingAndJson(text: string): { thinking: string; json: string } {
+  const trimmed = text.trim();
+  const fence = trimmed.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/i);
+  if (fence?.index !== undefined) {
+    return {
+      thinking: trimmed.slice(0, fence.index).trim(),
+      json: extractJson(fence[1]),
+    };
+  }
+  const lineBrace = trimmed.search(/\n\{/);
+  const start = lineBrace >= 0 ? lineBrace + 1 : trimmed.indexOf("{");
+  if (start < 0) throw new Error("模型没有返回 JSON 对象");
+  return {
+    thinking: trimmed.slice(0, start).trim(),
+    json: extractJson(trimmed.slice(start)),
+  };
+}
+
+function thinkingPrefix(text: string): string {
+  const fence = text.search(/```(?:json)?/);
+  if (fence >= 0) return text.slice(0, fence).trimEnd();
+  const lineBrace = text.search(/\n\{/);
+  if (lineBrace >= 0) return text.slice(0, lineBrace).trimEnd();
+  if (text.trimStart().startsWith("{")) return "";
+  return text;
+}
+
 const topicModelContract = {
   requiredFields: ["id", "topic", "lessonTitle", "coreOutcome", "diagnosticDimensions", "conceptRoute", "boundaryCases", "practiceTarget", "rubricAnchors", "evidenceSources", "confidence", "subject", "grounding", "capabilities"],
   diagnosticDimensionFields: ["id", "tab", "question", "options: { id, label }[]"],
@@ -146,7 +192,7 @@ const topicModelContract = {
 };
 
 const turnDecisionContract = {
-  requiredFields: ["intent", "understoodMeaning", "evidence", "assessment", "nextAction", "statePatch", "responsePlan"],
+  requiredFields: ["intent", "understoodMeaning", "evidence", "assessment", "nextAction", "statePatch", "responsePlan", "pedagogy"],
   intentValues: ["answer", "dont_know", "disagreement", "clarification", "direct_answer_request", "topic_switch", "meta_question", "stop"],
   assessmentStatusValues: ["not-answered", "insufficient", "partial", "misconception", "mastered"],
   nextActionValues: ["explain", "give-example", "ask-clarification", "repair-misconception", "ask-socratic-question", "give-practice", "advance-concept", "switch-topic", "complete"],
@@ -154,6 +200,7 @@ const turnDecisionContract = {
   learningEvidenceFields: ["learnerQuote", "criterion: accurate|explained|discrimination|transfer|performance", "strength: weak|sufficient"],
   statePatchFields: ["activeConceptId?", "addMisconception?", "masteredConceptId?"],
   responsePlanFields: ["goal", "teachingAtom", "gapToRepair", "keyPoints", "allowedContent", "forbiddenContent", "question?"],
+  pedagogyFields: ["hit", "unpunched", "invented", "nextLayer", "sourceMove", "nextQuestion", "questionPurpose", "restatedBiography"],
 };
 
 const diagnosisContract = {
@@ -255,6 +302,74 @@ export function normalizeDiagnosis(value: unknown): unknown {
   };
 }
 
+const questionPurposes = ["accurate", "explained", "discrimination", "transfer", "performance", "introduce"] as const;
+
+export function normalizeTurnDecision(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, any>;
+  const plan = source.responsePlan ?? source.plan ?? {};
+  const pedagogyRaw = source.pedagogy ?? source.move ?? {};
+  const rawNextQuestion = textValue(pedagogyRaw.nextQuestion)
+    ?? textValue(plan.question)
+    ?? "";
+  const nextQuestion = isBannedQuestion(rawNextQuestion) ? "" : rawNextQuestion;
+  const invented = textValue(pedagogyRaw.invented) ?? "";
+  const questionPurposeRaw = textValue(pedagogyRaw.questionPurpose);
+  const questionPurpose = questionPurposes.includes(questionPurposeRaw as typeof questionPurposes[number])
+    ? questionPurposeRaw
+    : "explained";
+  const pedagogy = {
+    hit: textValue(pedagogyRaw.hit) ?? textValue(source.understoodMeaning) ?? "",
+    unpunched: textValue(pedagogyRaw.unpunched) ?? "",
+    invented,
+    nextLayer: textValue(pedagogyRaw.nextLayer) ?? textValue(plan.gapToRepair) ?? textValue(plan.teachingAtom) ?? "",
+    sourceMove: textValue(pedagogyRaw.sourceMove) ?? textValue(plan.teachingAtom) ?? "",
+    nextQuestion,
+    questionPurpose,
+    restatedBiography: pedagogyRaw.restatedBiography === true,
+  };
+  const nextAction = invented && (source.nextAction === "ask-clarification" || !source.nextAction)
+    ? "repair-misconception"
+    : source.nextAction ?? "ask-socratic-question";
+  const evidence = (Array.isArray(source.evidence) ? source.evidence : [])
+    .map((item: unknown) => normalizeQuoteImplication(item))
+    .filter((item: { quote: string; implication: string } | undefined): item is { quote: string; implication: string } => Boolean(item));
+  if (evidence.length === 0 && (pedagogy.hit || textValue(source.understoodMeaning))) {
+    evidence.push({
+      quote: pedagogy.hit || "学习者原话",
+      implication: textValue(source.understoodMeaning) ?? "可继续用于本轮教学",
+    });
+  }
+  const assessmentRaw = source.assessment ?? {};
+  const assessmentEvidence = Array.isArray(assessmentRaw.evidence) ? assessmentRaw.evidence : [];
+  return {
+    intent: source.intent ?? "answer",
+    understoodMeaning: textValue(source.understoodMeaning) ?? "已根据原话继续本轮教学",
+    evidence,
+    assessment: {
+      status: assessmentRaw.status ?? "partial",
+      score: typeof assessmentRaw.score === "number" ? assessmentRaw.score : undefined,
+      rubricEvidence: Array.isArray(assessmentRaw.rubricEvidence) ? assessmentRaw.rubricEvidence : [],
+      evidence: assessmentEvidence,
+    },
+    nextAction,
+    responsePlan: {
+      goal: textValue(plan.goal) ?? pedagogy.nextLayer ?? "继续当前节点",
+      teachingAtom: textValue(plan.teachingAtom) ?? pedagogy.nextLayer ?? "当前节点",
+      gapToRepair: textValue(plan.gapToRepair) ?? pedagogy.unpunched ?? pedagogy.nextLayer ?? "",
+      keyPoints: Array.isArray(plan.keyPoints) ? plan.keyPoints : [pedagogy.nextLayer].filter(Boolean),
+      allowedContent: Array.isArray(plan.allowedContent) ? plan.allowedContent : [],
+      forbiddenContent: Array.isArray(plan.forbiddenContent) ? plan.forbiddenContent : ["后续节点", "完整课程讲解"],
+      question: textValue(plan.question) || nextQuestion || undefined,
+    },
+    pedagogy,
+    statePatch: {
+      ...(source.statePatch ?? {}),
+      addMisconception: textValue(source.statePatch?.addMisconception) || invented || undefined,
+    },
+  };
+}
+
 export function normalizeTopicModel(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, any>;
@@ -317,6 +432,73 @@ export function normalizeTopicModel(value: unknown): unknown {
       missing: Array.isArray(source.capabilities?.missing) ? source.capabilities.missing.map(String) : [],
     },
   };
+}
+
+async function streamThinkThenJson<T>(input: {
+  model: any;
+  schema: z.ZodType<T>;
+  system: string;
+  prompt: string;
+  contract?: unknown;
+  normalize?: (value: unknown) => unknown;
+  signal?: AbortSignal;
+  onThinking?: (text: string) => Promise<void> | void;
+}): Promise<{ value: T; thinking: string }> {
+  const result = streamText({
+    model: input.model,
+    abortSignal: input.signal,
+    system: input.system,
+    prompt: input.prompt,
+  });
+
+  let text = "";
+  let nativeThinking = "";
+  let emittedThinkingLength = 0;
+
+  const emitThinking = async (chunk: string) => {
+    if (!chunk) return;
+    await input.onThinking?.(chunk);
+  };
+
+  for await (const part of result.fullStream) {
+    if (part.type === "reasoning-delta") {
+      const delta = "text" in part ? String(part.text ?? "") : "";
+      nativeThinking += delta;
+      await emitThinking(delta);
+      continue;
+    }
+    if (part.type === "text-delta") {
+      text += part.text;
+      const prefix = thinkingPrefix(text);
+      if (prefix.length > emittedThinkingLength) {
+        await emitThinking(prefix.slice(emittedThinkingLength));
+        emittedThinkingLength = prefix.length;
+      }
+    }
+  }
+
+  try {
+    const split = splitThinkingAndJson(text);
+    const value = input.schema.parse(input.normalize ? input.normalize(JSON.parse(split.json)) : JSON.parse(split.json));
+    const thinking = [nativeThinking.trim(), split.thinking].filter(Boolean).join("\n\n");
+    return { value, thinking };
+  } catch (firstError) {
+    const retry = await generateJson({
+      model: input.model,
+      schema: input.schema,
+      system: "把用户提供的模型输出修复成符合要求的合法 JSON。只输出 JSON 对象，不要解释。",
+      prompt: JSON.stringify({
+        requiredContract: input.contract,
+        originalOutput: text,
+        validationError: String(firstError),
+      }),
+      contract: input.contract,
+      normalize: input.normalize,
+      signal: input.signal,
+    });
+    const thinking = [nativeThinking.trim(), thinkingPrefix(text).trim()].filter(Boolean).join("\n\n");
+    return { value: retry, thinking };
+  }
 }
 
 async function generateJson<T>(input: {
@@ -402,7 +584,8 @@ export class AiTutorModelClient implements TutorModelClient {
         "每条判断必须引用具体题目和所选选项，不能把已作答诊断解释成不知道或没有证据。",
         "诊断只描述学习起点，不要讲课程内容，也不要生成教学计划。",
         "学习对象是开放的；忠于用户目标，不根据类型擅自扩大课程范围。",
-        "当前诊断是选择题，只用于判断讲解深浅，不能证明完整掌握一个内容节点。skipSuggestions 返回空数组。",
+        "当前诊断是选择题，只用于判断讲解深浅和加快已有直觉的节点，不能证明完整掌握。",
+        "skipSuggestions 标注学习者可能已有直觉的节点，供后续教学加快、不问已会的定义；编排器不会因此跳过节点。",
         "evidence 必须是 { quote, implication } 对象数组，禁止输出字符串数组。",
         "skipSuggestions 每项必须是 { conceptId, reason, confidence }，conceptId 必须对应 conceptRoute 中的 id。",
         `必须严格遵守字段要求：${JSON.stringify(diagnosisContract)}`,
@@ -411,71 +594,83 @@ export class AiTutorModelClient implements TutorModelClient {
     });
   }
 
-  async analyzeTurn(input: { message: string; state: TutorState; topicModel: TopicModel }, signal?: AbortSignal): Promise<TutorTurnDecision> {
+  async analyzeTurn(input: {
+    message: string;
+    state: TutorState;
+    topicModel: TopicModel;
+    onThinking?: (text: string) => Promise<void> | void;
+  }, signal?: AbortSignal): Promise<TutorTurnDecision> {
     const activeConcept = input.topicModel.conceptRoute[input.state.activeConcept] ?? input.topicModel.conceptRoute[0];
     const activeRubric = input.topicModel.rubricAnchors.find((item) => item.conceptId === activeConcept?.id);
     const nodeState = activeConcept ? input.state.nodeLearningStates[activeConcept.id] : undefined;
     const lastAssistantMessage = [...input.state.messages].reverse().find((item) => item.role === "assistant");
-    const timeoutSignal = AbortSignal.timeout(45_000);
+    const lastQuestion = nodeState?.questionsAsked.at(-1) || lastAssistantMessage?.content || "";
+    const timeoutSignal = AbortSignal.timeout(90_000);
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const result = await generateObject({
+    const { value, thinking } = await streamThinkThenJson({
       model: this.model,
       schema: turnDecisionSchema,
-      schemaName: "TutorTurnDecision",
-      schemaDescription: "对学习者本轮回答的判断，以及下一步唯一教学动作",
-      mode: "json",
-      maxRetries: 0,
-      abortSignal,
-      providerOptions: { openai: { structuredOutputs: false } },
+      signal: abortSignal,
+      contract: turnDecisionContract,
+      normalize: normalizeTurnDecision,
+      onThinking: input.onThinking,
       system: [
-        "你是通用私教的教学决策器。你现在只生成 TutorTurnDecision JSON，不要直接回答用户。",
-        "特别区分：回答、不知道、反驳老师、请求澄清、要求直接讲解和切换主题。",
-        "用户说“不知道”不是错误答案；用户说“错了”不是知识作答，而是对老师判断的异议。",
-        "只有用户提供了与当前 rubric 相关的可观察证据，才能评估为 partial 或 mastered。",
-        "必须引用用户原话并分别记录准确、解释、辨析、迁移或实操证据；没有对应证据不得假定掌握。",
-        "每轮只选择一个 teachingAtom，只修复一个 gapToRepair。allowedContent 必须足够窄，forbiddenContent 要阻止提前教授后续节点。",
-        "不得要求学习者猜来源专属事实。人物、历史、作品情节等节点要先介绍 activeConcept.target 中的具体内容，再询问其意义或机制。",
-        "不要凭固定关键词评分，不要假设用户接受了老师上一轮判断。",
-        `必须严格遵守以下字段结构，字段名和值类型不能改变：${JSON.stringify(turnDecisionContract)}`,
-        "只输出符合 schema 的结构化对象。",
+        "你是一对一私教。先写真实教学思考，再输出 JSON。思考是给开发者看的原文，不要写成条目摘要，不要写政策检查清单。",
+        `思考第一句必须是：我问了「${lastQuestion.slice(0, 180) || "上一问"}」。他说了「${input.message.slice(0, 180)}」。`,
+        "接着写：原话里对了哪半（引用原词）；哪个词用了但没打透；有没有发明源材料里没有的概念；本轮只补哪一层；下一问为什么换这一层。",
+        "下一问必须来自当前节点，必须换一层（解释 / 场景迁移 / 辨析），必须带（是A还是B）支架。",
+        "禁止摘要题：最关键的区别、机制或作用是什么。禁止再用一句话说明。禁止同义反复上一问。",
+        "invented 非空时 nextAction 必须是 repair-misconception。questionsAsked 非空时 restatedBiography 必须为 false。",
+        "用户说“不知道”不是错误答案；用户说“错了”是对老师的异议。",
+        "思考写完后空一行，再输出一个 JSON 对象。JSON 字段：",
+        JSON.stringify(turnDecisionContract),
       ].join("\n"),
       prompt: JSON.stringify({
         userMessage: input.message,
         lastAssistantMessage: lastAssistantMessage?.content ?? "",
+        lastQuestion,
+        questionsAsked: nodeState?.questionsAsked ?? [],
         activeConcept,
         activeRubric,
         currentEvidence: nodeState?.evidence ?? [],
         currentMisconceptions: nodeState?.misconceptions ?? [],
         learnerProfile: input.state.learnerProfile,
+        knownIntuitions: input.state.knownIntuitions ?? [],
       }),
     });
-    return result.object;
+    return { ...value, thinking };
   }
 
   async streamResponse(input: { message: string; state: TutorState; topicModel: TopicModel; decision: TutorTurnDecision }, onDelta: (text: string) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
-    const timeoutSignal = AbortSignal.timeout(45_000);
+    const timeoutSignal = AbortSignal.timeout(90_000);
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const activeConcept = input.topicModel.conceptRoute[input.state.activeConcept];
+    const nodeState = activeConcept ? input.state.nodeLearningStates[activeConcept.id] : undefined;
     const result = streamText({
       model: this.model,
       abortSignal,
-      maxRetries: 0,
+      maxRetries: 1,
       system: [
-        "你是一个专业、耐心、使用苏格拉底式引导的通用私教。",
-        "根据教学决策生成自然语言回答，不要暴露隐藏推理过程。",
-        "先回应用户当前真实意图，再给最小必要解释或例子，最后只问一个核心问题。",
-        "首次进入节点时，先完整讲清 decision.responsePlan.keyPoints 中的必要背景和核心内容，再提问；最小解释不能省略理解当前节点所需的因果链。",
-        "严格执行 decision.responsePlan：只讲 teachingAtom 和 allowedContent，不得输出 forbiddenContent，不得一次总结整门课程。",
-        "正文原则上不超过 600 个中文字符。",
+        "你是一对一私教。根据教学诊断开口，不要暴露隐藏推理过程。",
+        "结构：先回应对话中的原话（肯定 hit；把 unpunched 打透；invented 非空就当场叫停并纠正，那不是源材料里的东西），再只教 nextLayer / sourceMove 这一层，最后只问一个问题。",
+        "问题优先用 pedagogy.nextQuestion 或 responsePlan.question。两者都空时，根据当前节点 target 现场设计一个带提示的对比、机制或场景题。",
+        "禁止摘要题（最关键的区别 / 机制 / 作用是什么）。禁止复述题（再用一句话说明为什么会产生这种结果）。禁止同义反复上一问。",
+        "questionsAsked 非空或 pedagogy.restatedBiography 为 false 时，禁止重讲人物背景、传记或节点开场故事。",
+        "诊断开场（teachingAtom 含“诊断”或 phase 为 diagnose）：只用 1-2 句说明要摸底，立刻问诊断题。禁止讲解 coreOutcome，禁止给出定义或答案。",
+        "首次进入节点（questionsAsked 为空且 questionPurpose 为 introduce）：先把 keyPoints / target 里不可推导的事实讲清楚，再问对比题，不要问课堂摘要。",
+        "严格执行 forbiddenContent。不得一次总结整门课程，不得提前教授后续节点。",
         "如果用户表示不知道，降低难度并给例子；如果用户反驳，先承认并澄清，不要强行评价。",
       ].join("\n"),
       prompt: JSON.stringify({
         userMessage: input.message,
+        phase: input.state.phase,
         topic: formatTopicContext(input.topicModel),
         decision: input.decision,
+        pedagogy: input.decision.pedagogy,
         learnerProfile: input.state.learnerProfile,
-        currentNodeState: input.topicModel.conceptRoute[input.state.activeConcept]
-          ? input.state.nodeLearningStates[input.topicModel.conceptRoute[input.state.activeConcept].id]
-          : undefined,
+        knownIntuitions: input.state.knownIntuitions ?? [],
+        questionsAsked: nodeState?.questionsAsked ?? [],
+        currentNodeState: nodeState,
       }),
     });
     let text = "";

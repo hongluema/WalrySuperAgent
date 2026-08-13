@@ -7,7 +7,7 @@ import { TutorOrchestrator } from "./orchestrator.js";
 import { TutorStore } from "./store.js";
 import type { TopicModel, TutorEvent, TutorState, TutorTurnDecision } from "./types.js";
 import type { TutorModelClient } from "./model-client.js";
-import { normalizeDiagnosis, normalizeTopicModel } from "./model-client.js";
+import { isBannedQuestion, normalizeDiagnosis, normalizeTopicModel, normalizeTurnDecision, splitThinkingAndJson } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
 
 function fakeTopicModel(): TopicModel {
@@ -77,7 +77,10 @@ function fakeModelClient(): TutorModelClient {
       learnerProfile: answeredDiagnostics.map((item) => `${item.question}：${item.optionLabel}`),
       evidence: answeredDiagnostics.map((item) => ({ quote: `${item.question} -> ${item.optionLabel}`, implication: "用户已经完成该诊断题" })),
     }),
-    analyzeTurn: async ({ message }: { message: string; state: TutorState; topicModel: TopicModel }) => fakeDecision(message),
+    analyzeTurn: async ({ message, onThinking }: { message: string; state: TutorState; topicModel: TopicModel; onThinking?: (text: string) => void | Promise<void> }) => {
+      await onThinking?.(`我问了「你会如何判断？」。他说了「${message}」。\n命中了现金流方向，下一问换一层。`);
+      return fakeDecision(message);
+    },
     streamResponse: async ({ decision }: { message: string; state: TutorState; topicModel: TopicModel; decision: TutorTurnDecision }, onDelta: (text: string) => void | Promise<void>) => {
       await onDelta(decision.responsePlan.goal);
       return decision.responsePlan.goal;
@@ -140,6 +143,43 @@ test("normalizes loose diagnosis shapes before TutorDiagnosis validation", () =>
   ]);
 });
 
+test("splits free teaching thought from the trailing JSON object", () => {
+  const split = splitThinkingAndJson(`我问了「房子是资产吗」。他说了「自住房也算资产」。\n「也算」没打透现金流。\n\n{"intent":"answer","understoodMeaning":"把所有权当成资产"}\n`);
+  assert.match(split.thinking, /我问了「房子是资产吗」/);
+  assert.match(split.thinking, /自住房也算资产/);
+  assert.doesNotMatch(split.thinking, /understoodMeaning/);
+  assert.match(split.json, /"intent":"answer"/);
+});
+
+test("rejects classroom-summary questions", () => {
+  assert.equal(isBannedQuestion("根据刚才介绍的内容，最关键的区别、机制或作用是什么？"), true);
+  assert.equal(isBannedQuestion("再用一句话说明为什么会产生这种结果"), true);
+  assert.equal(isBannedQuestion("加薪三倍，循环会停下来还是转得更快？（是停下来，还是圈更快？）"), false);
+});
+
+test("strips summary questions from a teaching decision", () => {
+  const normalized = normalizeTurnDecision({
+    understoodMeaning: "抓住了工具但没打透",
+    pedagogy: { hit: "产生资产的工具", unpunched: "工具", nextLayer: "钱是主人还是仆人", nextQuestion: "最关键的区别、机制或作用是什么？" },
+  }) as Record<string, any>;
+  assert.equal(normalized.pedagogy.nextQuestion, "");
+  assert.equal(normalized.responsePlan.question, undefined);
+});
+
+test("normalizes a loose teaching decision into a pedagogy move", () => {
+  const normalized = normalizeTurnDecision({
+    understoodMeaning: "抓住了工具但没打透",
+    pedagogy: { hit: "产生资产的工具", unpunched: "工具", nextLayer: "钱是主人还是仆人", nextQuestion: "账上紧时下一步是什么？" },
+  }) as Record<string, any>;
+  assert.equal(normalized.intent, "answer");
+  assert.equal(normalized.nextAction, "ask-socratic-question");
+  assert.equal(normalized.pedagogy.hit, "产生资产的工具");
+  assert.equal(normalized.pedagogy.questionPurpose, "explained");
+  assert.equal(normalized.pedagogy.restatedBiography, false);
+  assert.equal(normalized.responsePlan.question, "账上紧时下一步是什么？");
+  assert.equal(normalized.evidence[0].quote, "产生资产的工具");
+});
+
 test("upgrades legacy topic models without introducing a closed subject enum", () => {
   const legacy = fakeTopicModel();
   delete (legacy as Partial<TopicModel>).subject;
@@ -171,7 +211,7 @@ test("runs the diagnostic journey and persists resumable state", async () => {
     assert.equal(latestTrace?.type, "reasoning.trace.ready");
     if (latestTrace?.type === "reasoning.trace.ready") {
       assert.equal(latestTrace.trace.phase, "diagnose");
-      assert.equal(latestTrace.trace.selectedAction, "ask-socratic-question");
+      assert.match(latestTrace.trace.rawThinking, /没有对学习者回答做教学诊断|诊断开场/);
     }
 
     events.length = 0;
@@ -186,8 +226,8 @@ test("runs the diagnostic journey and persists resumable state", async () => {
     const teachingTrace = events.find((event) => event.type === "reasoning.trace.ready");
     assert.equal(teachingTrace?.type, "reasoning.trace.ready");
     if (teachingTrace?.type === "reasoning.trace.ready") {
-      assert.equal(teachingTrace.trace.selectedAction, "explain");
-      assert.match(teachingTrace.trace.currentGoal, /第一个概念/);
+      assert.match(teachingTrace.trace.rawThinking, /第一个概念|编排器/);
+      assert.doesNotMatch(teachingTrace.trace.rawThinking, /不展示隐藏推理文本/);
     }
 
     const state = JSON.parse(await readFile(join(root, "sessions", "test-session.json"), "utf8")) as { schemaVersion: number; phase: string; currentCard: number; learnerProfile: string[] };
@@ -296,7 +336,10 @@ test("starts story nodes with grounded content instead of asking for unknown fac
     assert.deepEqual(state.lastDecision?.responsePlan.keyPoints, [
       "先介绍故事发生的背景、关键人物，以及这段故事如何引出主题",
     ]);
-    assert.match(state.lastDecision?.responsePlan.question ?? "", /根据刚才介绍的内容/);
+    assert.equal(state.lastDecision?.responsePlan.question, undefined);
+    assert.equal(state.lastDecision?.pedagogy?.questionPurpose, "introduce");
+    assert.equal(state.lastDecision?.pedagogy?.restatedBiography, true);
+    assert.doesNotMatch(state.lastDecision?.responsePlan.question ?? "", /根据刚才介绍的内容|最关键的区别/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -386,6 +429,68 @@ test("does not mark a node mastered without sufficient evidence in all core crit
   }
 });
 
+test("diagnostic intro does not leak the core outcome or answers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-intro-leak-test-"));
+  try {
+    const client = fakeModelClient();
+    let intro: TutorTurnDecision | undefined;
+    client.streamResponse = async ({ decision }, onDelta) => {
+      intro = decision;
+      await onDelta(decision.responsePlan.goal);
+      return decision.responsePlan.goal;
+    };
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
+    await tutor.run("intro-session", "我想学习一个全新的对象", () => {});
+
+    assert.ok(intro);
+    assert.equal(intro.responsePlan.question, "你做过什么？");
+    assert.ok(!intro.responsePlan.keyPoints.some((item) => item.includes("能够理解核心概念并在新场景中独立应用")));
+    assert.ok(intro.responsePlan.forbiddenContent.some((item) => /答案|定义|coreOutcome|核心结论/.test(item)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("decision fallback keeps teaching from the learner quote instead of asking for a restatement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-teach-fallback-test-"));
+  try {
+    const client = fakeModelClient();
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
+
+    await tutor.run("teach-fallback-session", "我想学习一个全新的对象", () => {});
+    await tutor.run("teach-fallback-session", "完成诊断", () => {}, undefined, {
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+    });
+
+    client.analyzeTurn = async () => { throw new Error("结构化输出校验失败"); };
+    const events: TutorEvent[] = [];
+    await tutor.run("teach-fallback-session", "对钱是不是当作产生资产的工具", (event) => { events.push(event); });
+
+    assert.ok(events.some((event) => event.type === "model.degraded" && event.stage === "decision"));
+    assert.equal(events.some((event) => event.type === "run.failed"), false);
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "teach-fallback-session.json"), "utf8")) as TutorState;
+    const decision = state.lastDecision;
+    assert.ok(decision);
+    assert.notEqual(decision.nextAction, "ask-clarification");
+    assert.doesNotMatch(decision.responsePlan.question ?? "", /再用一句话说明/);
+    assert.doesNotMatch(decision.understoodMeaning, /评估未完成/);
+    assert.doesNotMatch(decision.evidence[0]?.implication ?? "", /暂不据此更新掌握状态/);
+    assert.match(decision.evidence[0]?.quote ?? "", /产生资产的工具/);
+    assert.equal(decision.pedagogy?.restatedBiography, false);
+    assert.equal(decision.responsePlan.question, undefined);
+    assert.match(decision.thinking ?? "", /带着原话继续教|教学决策失败/);
+    const thinkingTrace = events.find((event) => event.type === "reasoning.trace.ready");
+    assert.equal(thinkingTrace?.type, "reasoning.trace.ready");
+    if (thinkingTrace?.type === "reasoning.trace.ready") {
+      assert.match(thinkingTrace.trace.rawThinking, /带着原话继续教|教学决策失败/);
+      assert.doesNotMatch(thinkingTrace.trace.rawThinking, /暂不据此更新掌握状态/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("degrades model failures without failing or losing the teaching turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-model-fallback-test-"));
   try {
@@ -446,7 +551,35 @@ test("diagnostic suggestions do not skip content nodes", async () => {
     const teachingTrace = events.find((event) => event.type === "reasoning.trace.ready");
     assert.equal(teachingTrace?.type, "reasoning.trace.ready");
     if (teachingTrace?.type === "reasoning.trace.ready") {
-      assert.match(teachingTrace.trace.currentGoal, /第一个概念/);
+      assert.match(teachingTrace.trace.rawThinking, /第一个概念|编排器/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("streams the model's actual teaching thought instead of a policy-check summary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-raw-thinking-test-"));
+  try {
+    const client = fakeModelClient();
+    const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
+    await tutor.run("raw-thinking-session", "我想学习一个全新的对象", () => {});
+    await tutor.run("raw-thinking-session", "完成诊断", () => {}, undefined, {
+      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+    });
+
+    const events: TutorEvent[] = [];
+    await tutor.run("raw-thinking-session", "对钱是不是当作产生资产的工具", (event) => { events.push(event); });
+
+    const deltas = events.filter((event) => event.type === "reasoning.delta").map((event) => event.text).join("");
+    assert.match(deltas, /我问了/);
+    assert.match(deltas, /产生资产的工具/);
+    const trace = events.find((event) => event.type === "reasoning.trace.ready");
+    assert.equal(trace?.type, "reasoning.trace.ready");
+    if (trace?.type === "reasoning.trace.ready") {
+      assert.equal(trace.trace.rawThinking, deltas);
+      assert.doesNotMatch(trace.trace.rawThinking, /不展示隐藏推理文本/);
+      assert.doesNotMatch(trace.trace.rawThinking, /先理解用户意图，再选择教学动作/);
     }
   } finally {
     await rm(root, { recursive: true, force: true });

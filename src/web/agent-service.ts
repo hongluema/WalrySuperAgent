@@ -52,7 +52,7 @@ function assistantText(message: ModelMessage | undefined): string {
 }
 
 function makeWebTrace(
-  input: WebAgentRunInput,
+  _input: WebAgentRunInput,
   evidence: string[],
   action: string,
   reason: string,
@@ -61,21 +61,8 @@ function makeWebTrace(
 ): VisibleReasoningTrace {
   return {
     phase: "teach",
-    currentGoal: "理解当前用户问题，并给出可验证、可执行的回答",
-    inputsUsed: ["当前用户消息", "当前会话历史", "Web Agent 规则", "已注册工具定义"],
-    observedEvidence: evidence,
-    candidateInterpretations: [
-      { interpretation: "用户需要直接解释或解决当前问题", supportingEvidence: [input.message] },
-      { interpretation: "用户的问题需要额外数据或计算才能回答", supportingEvidence: ["工具是否能补充事实依据"] },
-    ],
-    rejectedInterpretations: [
-      { interpretation: "仅凭猜测回答", reason: "没有足够证据时应明确边界，必要时调用允许的工具" },
-    ],
-    selectedInterpretation: "按当前问题的具体目标组织回答，并把工具结果纳入判断",
-    policyChecks: ["不展示隐藏推理文本", "仅使用 Web 白名单工具", "工具结果和流式输出同步记录"],
+    rawThinking: [reason, ...evidence, ...stateUpdates].join("\n"),
     selectedAction: action,
-    actionReason: reason,
-    stateUpdates,
     sourceCount,
   };
 }

@@ -39,6 +39,17 @@ export type LearningEvidence = {
   strength: "weak" | "sufficient";
 };
 
+export type PedagogyMove = {
+  hit: string;
+  unpunched: string;
+  invented: string;
+  nextLayer: string;
+  sourceMove: string;
+  nextQuestion: string;
+  questionPurpose: "accurate" | "explained" | "discrimination" | "transfer" | "performance" | "introduce";
+  restatedBiography: boolean;
+};
+
 export type NodeLearningState = {
   nodeId: string;
   stage: "introduce" | "elicit" | "repair" | "practice" | "transfer" | "doubt-check" | "mastered";
@@ -126,6 +137,8 @@ export type TutorTurnDecision = {
     forbiddenContent: string[];
     question?: string;
   };
+  pedagogy?: PedagogyMove;
+  thinking?: string;
 };
 
 export type UniversalTutorProfile = {
@@ -162,22 +175,23 @@ export type RoadmapNode = {
 
 export type VisibleReasoningTrace = {
   phase: TutorPhase;
-  currentGoal: string;
-  inputsUsed: string[];
-  observedEvidence: string[];
-  candidateInterpretations: Array<{
+  rawThinking: string;
+  currentGoal?: string;
+  inputsUsed?: string[];
+  observedEvidence?: string[];
+  candidateInterpretations?: Array<{
     interpretation: string;
     supportingEvidence: string[];
   }>;
-  rejectedInterpretations: Array<{
+  rejectedInterpretations?: Array<{
     interpretation: string;
     reason: string;
   }>;
-  selectedInterpretation: string;
-  policyChecks: string[];
-  selectedAction: string;
-  actionReason: string;
-  stateUpdates: string[];
+  selectedInterpretation?: string;
+  policyChecks?: string[];
+  selectedAction?: string;
+  actionReason?: string;
+  stateUpdates?: string[];
   sourceCount?: number;
 };
 
@@ -197,6 +211,7 @@ export type TutorState = {
   turnCount: number;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   learnerProfile: string[];
+  knownIntuitions: Array<{ conceptId: string; reason: string; confidence: "high" | "medium" }>;
   nodeLearningStates: Record<string, NodeLearningState>;
   updatedAt: string;
   lastDecision?: TutorTurnDecision;
@@ -213,6 +228,7 @@ export type TutorEvent =
   | { type: "diagnostic.card.ready"; card: DiagnosticCard }
   | { type: "diagnosis.ready"; diagnosis: string; background: string[] }
   | { type: "roadmap.ready"; roadmap: RoadmapNode[] }
+  | { type: "reasoning.delta"; text: string }
   | { type: "reasoning.trace.ready"; trace: VisibleReasoningTrace }
   | { type: "assessment.updated"; score: number; status: "in-progress" | "mastered" }
   | { type: "state.saved"; phase: TutorPhase; activeConcept: number }
