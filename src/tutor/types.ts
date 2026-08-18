@@ -9,6 +9,7 @@ export type TutorPhase =
 export type TutorTurnIntent =
   | "answer"
   | "dont_know"
+  | "no_doubts"
   | "disagreement"
   | "clarification"
   | "direct_answer_request"
@@ -33,10 +34,49 @@ export type LearningCapabilityPlan = {
   missing: string[];
 };
 
+export type EvidenceCriterion = "accurate" | "explained" | "discrimination" | "transfer" | "performance";
+
 export type LearningEvidence = {
   learnerQuote: string;
-  criterion: "accurate" | "explained" | "discrimination" | "transfer" | "performance";
+  criterion: EvidenceCriterion;
   strength: "weak" | "sufficient";
+  confidence?: number;
+};
+
+export type MisconceptionUpdate = {
+  description: string;
+  status: "open" | "repaired";
+  evidenceQuote: string;
+};
+
+export type QuestionPurpose = EvidenceCriterion | "introduce" | "doubt-check";
+
+export type DiagnosticKind = "baseline" | "motivation" | "focus" | "misconception" | "constraints";
+
+export type QuestionCandidate = {
+  purpose: QuestionPurpose;
+  text: string;
+  thinkingHint: string;
+};
+
+export type TutorAnswerEvaluation = {
+  intent: TutorTurnIntent;
+  understoodMeaning: string;
+  observations: Array<{ quote: string; implication: string }>;
+  assessment: {
+    status: "not-answered" | "insufficient" | "partial" | "misconception" | "mastered";
+    score?: number;
+    rubricEvidence: string[];
+    evidence: LearningEvidence[];
+  };
+  misconceptionUpdates: MisconceptionUpdate[];
+  pedagogy: {
+    hit: string;
+    unpunched: string;
+    invented: string;
+    sourceMove: string;
+  };
+  questionCandidates: QuestionCandidate[];
 };
 
 export type PedagogyMove = {
@@ -46,7 +86,7 @@ export type PedagogyMove = {
   nextLayer: string;
   sourceMove: string;
   nextQuestion: string;
-  questionPurpose: "accurate" | "explained" | "discrimination" | "transfer" | "performance" | "introduce";
+  questionPurpose: QuestionPurpose;
   restatedBiography: boolean;
 };
 
@@ -54,8 +94,10 @@ export type NodeLearningState = {
   nodeId: string;
   stage: "introduce" | "elicit" | "repair" | "practice" | "transfer" | "doubt-check" | "mastered";
   evidence: LearningEvidence[];
-  misconceptions: Array<{ description: string; status: "open" | "repaired" }>;
+  misconceptions: Array<{ description: string; status: "open" | "repaired"; evidenceQuote?: string }>;
   questionsAsked: string[];
+  lastQuestionPurpose?: QuestionPurpose;
+  hintLevel?: 0 | 1 | 2 | 3 | 4;
 };
 
 export type TopicModel = {
@@ -63,16 +105,23 @@ export type TopicModel = {
   topic: string;
   lessonTitle: string;
   coreOutcome: string;
+  backgroundBrief: string;
   diagnosticDimensions: Array<{
     id: string;
+    kind: DiagnosticKind;
     tab: string;
+    rationale: string;
+    teachingUse: string;
     question: string;
+    thinkingHint: string;
     options: DiagnosticOption[];
   }>;
   conceptRoute: Array<{
     id: string;
     title: string;
     target: string;
+    openingQuestion: string;
+    openingHint: string;
   }>;
   boundaryCases: string[];
   practiceTarget: string;
@@ -96,6 +145,13 @@ export type TutorDiagnosis = {
   summary: string;
   learnerProfile: string[];
   evidence: Array<{ quote: string; implication: string }>;
+  teachingApproach: {
+    startingPoint: string;
+    emphasis: string[];
+    exampleContext: string;
+    pacing: string;
+    rationale: string[];
+  };
   skipSuggestions?: Array<{
     conceptId: string;
     reason: string;
@@ -113,6 +169,7 @@ export type TutorTurnDecision = {
     rubricEvidence: string[];
     evidence: LearningEvidence[];
   };
+  misconceptionUpdates?: MisconceptionUpdate[];
   nextAction:
     | "explain"
     | "give-example"
@@ -135,6 +192,7 @@ export type TutorTurnDecision = {
     keyPoints: string[];
     allowedContent: string[];
     forbiddenContent: string[];
+    backgroundBrief?: string;
     question?: string;
   };
   pedagogy?: PedagogyMove;
@@ -161,8 +219,12 @@ export type DiagnosticCard = {
   id: string;
   index: number;
   total: number;
+  kind: DiagnosticKind;
   tab: string;
+  rationale: string;
+  teachingUse: string;
   question: string;
+  thinkingHint: string;
   options: DiagnosticOption[];
 };
 
@@ -211,6 +273,7 @@ export type TutorState = {
   turnCount: number;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   learnerProfile: string[];
+  teachingApproach?: TutorDiagnosis["teachingApproach"];
   knownIntuitions: Array<{ conceptId: string; reason: string; confidence: "high" | "medium" }>;
   nodeLearningStates: Record<string, NodeLearningState>;
   updatedAt: string;
@@ -224,9 +287,10 @@ export type TutorEvent =
   | { type: "grounding.degraded"; reason: string }
   | { type: "model.degraded"; stage: "decision" | "response"; reason: string }
   | { type: "topic.model.ready"; title: string; outcome: string; topic: string }
+  | { type: "topic.background.ready"; summary: string }
   | { type: "diagnostic.cards.ready"; cards: DiagnosticCard[] }
   | { type: "diagnostic.card.ready"; card: DiagnosticCard }
-  | { type: "diagnosis.ready"; diagnosis: string; background: string[] }
+  | { type: "diagnosis.ready"; diagnosis: string; background: string[]; teachingApproach: TutorDiagnosis["teachingApproach"] }
   | { type: "roadmap.ready"; roadmap: RoadmapNode[] }
   | { type: "reasoning.delta"; text: string }
   | { type: "reasoning.trace.ready"; trace: VisibleReasoningTrace }

@@ -78,6 +78,7 @@ export async function agentLoop(
 
     // --- 重试循环：网络错误时最多重试 MAX_RETRIES 次 ---
     for (let attempt = 1; ; attempt++) {
+      let upstreamError: unknown;
       try {
         // streamText 同步返回结果对象（不等模型生成完）：
         // - result.fullStream：异步事件流（text-delta / tool-call / tool-result / finish），下面 for await 逐块消费
@@ -94,7 +95,11 @@ export async function agentLoop(
             因为需要在每一步之间做很多事：打日志、检查 token 用量、判断是不是陷入死循环、决定要不要中断。
           */
           providerOptions: { openai: { parallelToolCalls: true } }, // 允许模型一次性返回多个工具调用
-          onError: () => {}, // 流式错误回调：吞掉错误，由外层 try/catch 处理
+          // AI SDK 遇到 provider 流错误时，最终常只会抛出
+          // "No output generated"。先保留原始错误，外层才能正确展示并分类。
+          onError: ({ error }) => {
+            upstreamError ??= error;
+          },
         });
 
         // 遍历异步数据流：数据一块一块地来，每块都要等
@@ -163,9 +168,14 @@ export async function agentLoop(
         stepUsage = await result.usage; // 取本步 token 用量
         break; // 成功执行完本步，跳出重试循环
       } catch (error) {
-        await trace?.recordAttemptError(step, attempt, error); // 记录本次尝试的错误  
+        const effectiveError = upstreamError ?? error;
+        await trace?.recordAttemptError(step, attempt, effectiveError); // 记录本次尝试的真实错误
         // 超过最大重试次数，或错误不可重试（如 4xx），直接抛给上层
-        if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
+        if (attempt > MAX_RETRIES || !isRetryable(effectiveError)) {
+          throw effectiveError instanceof Error
+            ? effectiveError
+            : new Error(String(effectiveError));
+        }
         const delay = calculateDelay(attempt);
         console.log(
           `  [重试] 第 ${attempt}/${MAX_RETRIES} 次，${delay}ms 后...`,

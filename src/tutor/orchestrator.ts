@@ -3,7 +3,7 @@ import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecis
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
-import { buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision } from "./pedagogy.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 
@@ -19,7 +19,17 @@ const phaseLabels = {
 type RunOptions = { diagnosticAnswers?: Record<string, string> };
 
 function cardsFor(model: TopicModel): DiagnosticCard[] {
-  return model.diagnosticDimensions.map((dimension, index) => ({ ...dimension, index, total: model.diagnosticDimensions.length }));
+  return model.diagnosticDimensions.map((dimension, index) => ({
+    ...dimension,
+    question: withThinkingHint(dimension.question, dimension.thinkingHint),
+    index,
+    total: model.diagnosticDimensions.length,
+  }));
+}
+
+function withThinkingHint(question: string, hint: string): string {
+  if (/（思路：[^）]+）/u.test(question)) return question;
+  return `${question.trim()}（思路：${hint.trim()}）`;
 }
 
 function answerLetter(input: string): string {
@@ -40,11 +50,22 @@ function answeredDiagnostics(state: TutorState) {
 }
 
 function makeTrace(state: TutorState, decision: TutorTurnDecision, thinking: string): VisibleReasoningTrace {
+  const observedEvidence = decision.assessment.evidence.map((item) => (
+    `${item.learnerQuote} -> ${item.criterion}/${item.strength}`
+  ));
+  const traceText = thinking.trim() || [
+    ...decision.evidence.map((item) => `${item.quote}：${item.implication}`),
+    ...observedEvidence,
+    `选择动作：${decision.nextAction}`,
+    `本轮目标：${decision.responsePlan.goal}`,
+  ].join("\n");
   return {
     phase: state.phase,
-    rawThinking: thinking.trim(),
+    rawThinking: traceText,
     selectedAction: decision.nextAction,
     currentGoal: decision.responsePlan.goal,
+    observedEvidence,
+    actionReason: decision.responsePlan.gapToRepair,
   };
 }
 
@@ -89,28 +110,26 @@ export class TutorOrchestrator {
   }
 
   private async decide(message: string, state: TutorState, topicModel: TopicModel, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
-    let thinking = "";
     try {
-      const decision = await this.modelClient!.analyzeTurn({
-        message,
-        state,
-        topicModel,
-        onThinking: async (text) => {
-          thinking += text;
-          await emit({ type: "reasoning.delta", text });
-        },
-      }, signal);
-      decision.thinking = decision.thinking?.trim() || thinking.trim() || "模型这一轮没有输出思考原文，只返回了结构化决策。";
+      const activeConcept = topicModel.conceptRoute[state.activeConcept] ?? topicModel.conceptRoute[0];
+      const nodeState = activeConcept ? state.nodeLearningStates[activeConcept.id] : undefined;
+      const evaluation = await this.modelClient!.evaluateAnswer({ message, state, topicModel }, signal);
+      const decision = buildEvidenceDrivenDecision({
+        model: topicModel,
+        activeConcept: state.activeConcept,
+        nodeState,
+        evaluation,
+      });
+      decision.thinking = makeTrace(state, decision, "").rawThinking;
+      await emit({ type: "reasoning.delta", text: decision.thinking });
       return decision;
     } catch (error) {
       const reason = error instanceof Error ? error.message : "模型决策失败";
       console.error("[Tutor] 教学决策降级", error);
       await emit({ type: "model.degraded", stage: "decision", reason });
       const fallback = buildFallbackTurnDecision(message, topicModel, state.activeConcept);
-      fallback.thinking = thinking.trim() || `教学决策失败：${reason}。带着原话继续教，不要求复述。`;
-      if (!thinking.trim() && fallback.thinking) {
-        await emit({ type: "reasoning.delta", text: fallback.thinking });
-      }
+      fallback.thinking = `教学评估失败：${reason}。带着原话继续教，不要求复述，也不推进掌握状态。`;
+      await emit({ type: "reasoning.delta", text: fallback.thinking });
       return fallback;
     }
   }
@@ -195,8 +214,10 @@ export class TutorOrchestrator {
           await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
           const decision = await this.decide(message, state, topicModel, emit, signal);
           state.lastDecision = decision;
+          this.applyStatePatch(state, topicModel, decision);
           await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
-          await this.streamResponse(state, topicModel, decision, message, emit, signal);
+          const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
+          this.recordQuestion(state, topicModel, decision, responseText);
           await this.persist(state, runId, emit);
           await emit({ type: "run.completed", runId });
           return;
@@ -243,14 +264,22 @@ export class TutorOrchestrator {
 
         const decision = buildFirstTeachingDecision(topicModel, diagnosis.summary, state.activeConcept);
         state.learnerProfile = diagnosis.learnerProfile;
+        state.teachingApproach = diagnosis.teachingApproach;
         state.knownIntuitions = diagnosis.skipSuggestions ?? [];
         state.lastDecision = decision;
-        await emit({ type: "diagnosis.ready", diagnosis: diagnosis.summary, background: diagnosis.learnerProfile });
+        await emit({
+          type: "diagnosis.ready",
+          diagnosis: diagnosis.summary,
+          background: diagnosis.learnerProfile,
+          teachingApproach: diagnosis.teachingApproach,
+        });
+        await emit({ type: "topic.background.ready", summary: topicModel.backgroundBrief });
         await emit({ type: "roadmap.ready", roadmap: state.roadmap });
         state.phase = "teach";
         await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
         await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
-        await this.streamResponse(state, topicModel, decision, message, emit, signal);
+        const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
+        this.recordQuestion(state, topicModel, decision, responseText);
         await this.persist(state, runId, emit);
         await emit({ type: "run.completed", runId });
         return;
@@ -264,7 +293,8 @@ export class TutorOrchestrator {
       if (decision.assessment.score !== undefined) {
         await emit({ type: "assessment.updated", score: decision.assessment.score, status: decision.assessment.status === "mastered" ? "mastered" : "in-progress" });
       }
-      await this.streamResponse(state, topicModel, decision, message, emit, signal);
+      const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
+      this.recordQuestion(state, topicModel, decision, responseText);
       await this.persist(state, runId, emit);
       await emit({ type: "run.completed", runId });
     } catch (error) {
@@ -283,39 +313,96 @@ export class TutorOrchestrator {
         evidence: [],
         misconceptions: [],
         questionsAsked: [],
+        hintLevel: 0 as const,
       };
-      nodeState.evidence.push(...decision.assessment.evidence);
-      const asked = decision.pedagogy?.nextQuestion || decision.responsePlan.question;
-      if (asked && !nodeState.questionsAsked.includes(asked)) {
-        nodeState.questionsAsked.push(asked);
+      for (const evidence of decision.assessment.evidence) {
+        const duplicate = nodeState.evidence.some((item) => (
+          item.learnerQuote === evidence.learnerQuote
+          && item.criterion === evidence.criterion
+          && item.strength === evidence.strength
+        ));
+        if (!duplicate) nodeState.evidence.push(evidence);
+      }
+      for (const update of decision.misconceptionUpdates ?? []) {
+        const existing = nodeState.misconceptions.find((item) => item.description === update.description);
+        if (existing) {
+          existing.status = update.status;
+          existing.evidenceQuote = update.evidenceQuote;
+        } else if (update.status === "open") {
+          nodeState.misconceptions.push(update);
+        }
       }
       const invented = decision.pedagogy?.invented?.trim();
       if (invented && !decision.statePatch.addMisconception) {
         decision.statePatch.addMisconception = invented;
       }
       if (decision.statePatch.addMisconception) {
-        nodeState.misconceptions.push({ description: decision.statePatch.addMisconception, status: "open" });
+        const existing = nodeState.misconceptions.find((item) => item.description === decision.statePatch.addMisconception);
+        if (existing) existing.status = "open";
+        else nodeState.misconceptions.push({ description: decision.statePatch.addMisconception, status: "open" });
         nodeState.stage = "repair";
+      }
+      if (decision.intent === "dont_know") {
+        nodeState.hintLevel = Math.min(4, (nodeState.hintLevel ?? 0) + 1) as 0 | 1 | 2 | 3 | 4;
+      }
+      if (decision.pedagogy?.questionPurpose === "doubt-check") nodeState.stage = "doubt-check";
+      else if (decision.nextAction === "give-practice") {
+        nodeState.stage = decision.pedagogy?.questionPurpose === "transfer" ? "transfer" : "practice";
+      } else if (decision.nextAction === "ask-socratic-question" && nodeState.stage !== "repair") {
+        nodeState.stage = "elicit";
       }
       state.nodeLearningStates[current.id] = nodeState;
     }
-    if (decision.statePatch.activeConceptId) {
-      const index = model.conceptRoute.findIndex((item) => item.id === decision.statePatch.activeConceptId);
-      if (index >= 0) state.activeConcept = index;
-    }
+    let masteryAccepted = !decision.statePatch.masteredConceptId;
     if (decision.statePatch.masteredConceptId) {
       const index = model.conceptRoute.findIndex((item) => item.id === decision.statePatch.masteredConceptId);
       const nodeState = index >= 0 ? state.nodeLearningStates[decision.statePatch.masteredConceptId] : undefined;
       const sufficient = new Set(nodeState?.evidence.filter((item) => item.strength === "sufficient").map((item) => item.criterion));
-      const hasCoreEvidence = ["accurate", "explained", "discrimination", "transfer"].every((criterion) => sufficient.has(criterion as any));
-      if (index >= 0 && state.roadmap[index] && hasCoreEvidence) {
+      const rubric = model.rubricAnchors.find((item) => item.conceptId === decision.statePatch.masteredConceptId);
+      const required = ["accurate", "explained", "discrimination", "transfer", ...(rubric?.performance?.trim() ? ["performance"] : [])];
+      const hasRequiredEvidence = required.every((criterion) => sufficient.has(criterion as any));
+      const hasOpenMisconception = nodeState?.misconceptions.some((item) => item.status === "open") ?? false;
+      if (index >= 0 && state.roadmap[index] && hasRequiredEvidence && !hasOpenMisconception && nodeState?.stage === "doubt-check") {
         state.roadmap[index].status = "mastered";
         if (nodeState) nodeState.stage = "mastered";
+        masteryAccepted = true;
       }
+    }
+    if (decision.statePatch.activeConceptId && masteryAccepted) {
+      const index = model.conceptRoute.findIndex((item) => item.id === decision.statePatch.activeConceptId);
+      if (index >= 0) {
+        state.activeConcept = index;
+        if (state.roadmap[index]?.status === "locked") state.roadmap[index].status = "active";
+      }
+    }
+    if (state.roadmap.length > 0 && state.roadmap.every((item) => item.status === "mastered")) {
+      state.phase = "complete";
     }
   }
 
-  private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
+  private recordQuestion(state: TutorState, model: TopicModel, decision: TutorTurnDecision, responseText: string) {
+    const question = decision.responsePlan.question
+      || decision.pedagogy?.nextQuestion
+      || responseText.match(/[^。！？\n]*(?:[？?])(?=\s*$)/u)?.[0]?.trim();
+    if (!question || !decision.pedagogy?.questionPurpose) return;
+    const current = model.conceptRoute[state.activeConcept] ?? model.conceptRoute[0];
+    if (!current) return;
+    const nodeState = state.nodeLearningStates[current.id] ?? {
+      nodeId: current.id,
+      stage: "introduce" as const,
+      evidence: [],
+      misconceptions: [],
+      questionsAsked: [],
+      hintLevel: 0 as const,
+    };
+    if (!nodeState.questionsAsked.includes(question)) nodeState.questionsAsked.push(question);
+    nodeState.lastQuestionPurpose = decision.pedagogy.questionPurpose === "introduce"
+      ? "accurate"
+      : decision.pedagogy.questionPurpose;
+    state.nodeLearningStates[current.id] = nodeState;
+  }
+
+  private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
     if (!this.modelClient) throw new Error("Tutor 模型客户端未配置");
     let text = "";
     try {
@@ -335,7 +422,14 @@ export class TutorOrchestrator {
       text += fallback;
       await emit({ type: "message.delta", text: fallback });
     }
+    const plannedQuestion = decision.responsePlan.question || decision.pedagogy?.nextQuestion;
+    if (plannedQuestion && !text.includes(plannedQuestion)) {
+      const questionSuffix = `${text.trim() ? "\n\n" : ""}${plannedQuestion}`;
+      text += questionSuffix;
+      await emit({ type: "message.delta", text: questionSuffix });
+    }
     if (text) state.messages.push({ role: "assistant", content: text });
+    return text;
   }
 
   private async persist(state: TutorState, runId: string, emit: (event: TutorEvent) => Promise<void> | void) {
