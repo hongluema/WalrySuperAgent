@@ -313,6 +313,8 @@ test("runs the diagnostic journey and persists resumable state", async () => {
     );
     assert.equal(events.some((event) => event.type === "research.completed"), false);
     assert.ok(events.some((event) => event.type === "message.delta"));
+    const progress = events.filter((event) => event.type === "reasoning.delta").map((event) => event.text).join("");
+    assert.match(progress, /检索|主题模型/);
     const latestTrace = [...events].reverse().find((event) => event.type === "reasoning.trace.ready");
     assert.equal(latestTrace?.type, "reasoning.trace.ready");
     if (latestTrace?.type === "reasoning.trace.ready") {
@@ -742,10 +744,11 @@ test("streams an auditable evidence-and-action trace instead of hidden chain of 
     const deltas = events.filter((event) => event.type === "reasoning.delta").map((event) => event.text).join("");
     assert.match(deltas, /产生资产的工具/);
     assert.match(deltas, /选择动作/);
+    assert.match(deltas, /正在根据你的回答做教学判断/);
     const trace = events.find((event) => event.type === "reasoning.trace.ready");
     assert.equal(trace?.type, "reasoning.trace.ready");
     if (trace?.type === "reasoning.trace.ready") {
-      assert.equal(trace.trace.rawThinking, deltas);
+      assert.ok(deltas.includes(trace.trace.rawThinking));
       assert.match(trace.trace.rawThinking, /选择动作/);
       assert.ok(Array.isArray(trace.trace.observedEvidence));
     }

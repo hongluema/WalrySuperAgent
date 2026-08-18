@@ -69,6 +69,10 @@ function makeTrace(state: TutorState, decision: TutorTurnDecision, thinking: str
   };
 }
 
+async function emitThinking(emit: (event: TutorEvent) => Promise<void> | void, text: string) {
+  await emit({ type: "reasoning.delta", text: text.endsWith("\n") ? text : `${text}\n` });
+}
+
 function emptyState(conversationId: string): TutorState {
   return {
     schemaVersion: 4,
@@ -111,6 +115,7 @@ export class TutorOrchestrator {
 
   private async decide(message: string, state: TutorState, topicModel: TopicModel, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
     try {
+      await emitThinking(emit, "正在根据你的回答做教学判断…");
       const activeConcept = topicModel.conceptRoute[state.activeConcept] ?? topicModel.conceptRoute[0];
       const nodeState = activeConcept ? state.nodeLearningStates[activeConcept.id] : undefined;
       const evaluation = await this.modelClient!.evaluateAnswer({ message, state, topicModel }, signal);
@@ -162,6 +167,7 @@ export class TutorOrchestrator {
 
       if (isNewTopic) {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });
+        await emitThinking(emit, "正在检索主题相关资料…");
         let researchMaterial: string | undefined;
         const researchQuery = `${message} 背景 核心内容 结构`;
         try {
@@ -175,6 +181,9 @@ export class TutorOrchestrator {
         } catch (error) {
           await emit({ type: "grounding.degraded", reason: error instanceof Error ? error.message : "搜索失败" });
         }
+        await emitThinking(emit, researchMaterial
+          ? "已找到参考资料，正在生成主题模型和诊断题…"
+          : "未取到检索结果，正在用已有知识生成主题模型和诊断题…");
         topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({
           userGoal: message,
           history: state.messages,
@@ -228,7 +237,9 @@ export class TutorOrchestrator {
         await emit({ type: "diagnostic.cards.ready", cards: state.diagnosticCards });
         await emit({ type: "diagnostic.card.ready", card: state.diagnosticCards[0] });
         const introDecision = buildIntroDecision(topicModel, state.diagnosticCards[0]?.question);
-        await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, introDecision, introDecision.thinking ?? "") });
+        const introTrace = makeTrace(state, introDecision, introDecision.thinking ?? "");
+        await emitThinking(emit, introTrace.rawThinking);
+        await emit({ type: "reasoning.trace.ready", trace: introTrace });
         await this.streamResponse(state, topicModel, introDecision, message, emit, signal);
         await this.persist(state, runId, emit);
         await emit({ type: "run.completed", runId });
@@ -256,6 +267,8 @@ export class TutorOrchestrator {
         }
 
         state.phase = "plan";
+        await emit({ type: "tutor.phase.changed", phase: "plan", label: phaseLabels.plan });
+        await emitThinking(emit, "正在根据摸底答案整理诊断结果和学习路线…");
         const diagnosis = await this.modelClient.compileDiagnosis({
           state,
           topicModel,
@@ -277,7 +290,9 @@ export class TutorOrchestrator {
         await emit({ type: "roadmap.ready", roadmap: state.roadmap });
         state.phase = "teach";
         await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
-        await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
+        const teachingTrace = makeTrace(state, decision, decision.thinking ?? "");
+        await emitThinking(emit, teachingTrace.rawThinking);
+        await emit({ type: "reasoning.trace.ready", trace: teachingTrace });
         const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
         this.recordQuestion(state, topicModel, decision, responseText);
         await this.persist(state, runId, emit);
@@ -404,6 +419,7 @@ export class TutorOrchestrator {
 
   private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
     if (!this.modelClient) throw new Error("Tutor 模型客户端未配置");
+    await emitThinking(emit, "正在组织回复…");
     let text = "";
     try {
       await this.modelClient.streamResponse({ message, state, topicModel: model, decision }, async (delta) => {
