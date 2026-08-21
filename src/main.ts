@@ -73,8 +73,9 @@ registry.register(createMemoryTool(memoryStore));
 
 // ── RAG ────────────────────────────────────────
 const vectorStore = new VectorStore();
-const embedFn = config.model.apiKey
-  ? createDashScopeEmbedder(config.model.apiKey)
+const dashscopeKey = process.env.DASHSCOPE_API_KEY;
+const embedFn = dashscopeKey
+  ? createDashScopeEmbedder(dashscopeKey)
   : createMockEmbedder();
 registry.register(...createRagTools(vectorStore, embedFn));
 
