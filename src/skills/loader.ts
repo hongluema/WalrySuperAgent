@@ -5,6 +5,7 @@ export interface SkillDefinition {
   name: string;
   description: string;
   whenToUse?: string;
+  alwaysOn: boolean;
   content: string;
   dirPath: string;
 }
@@ -42,6 +43,7 @@ export class SkillLoader {
         name: entry.name,
         description: parsed.description,
         whenToUse: parsed.whenToUse,
+        alwaysOn: parsed.alwaysOn,
         content: parsed.content,
         dirPath: path.join(this.skillsDir, entry.name),
       };
@@ -59,6 +61,22 @@ export class SkillLoader {
     return this.skills.get(name);
   }
 
+  alwaysOnSkills(): SkillDefinition[] {
+    return this.list().filter(s => s.alwaysOn);
+  }
+
+  buildAlwaysOnPromptSection(): string | null {
+    const skills = this.alwaysOnSkills();
+    if (skills.length === 0) return null;
+
+    const lines: string[] = [];
+    for (const skill of skills) {
+      lines.push(`[始终生效的教学法: ${skill.name}]`);
+      lines.push(skill.content);
+    }
+    return lines.join('\n');
+  }
+
   buildPromptSection(activeSkills: Set<string>): string | null {
     if (this.skills.size === 0) return null;
 
@@ -67,7 +85,7 @@ export class SkillLoader {
     if (activeSkills.size > 0) {
       for (const name of activeSkills) {
         const skill = this.skills.get(name);
-        if (!skill) continue;
+        if (!skill || skill.alwaysOn) continue;
         lines.push(`[激活的 Skill: ${skill.name}]`);
         lines.push(skill.content);
         lines.push('');
@@ -75,7 +93,7 @@ export class SkillLoader {
     }
 
     const available = this.list()
-      .filter(s => !activeSkills.has(s.name))
+      .filter(s => !activeSkills.has(s.name) && !s.alwaysOn)
       .map(s => {
         const hint = s.whenToUse ? ` (适用场景: ${s.whenToUse})` : '';
         return `  /${s.name} — ${s.description}${hint}`;
@@ -89,9 +107,9 @@ export class SkillLoader {
     return lines.length > 0 ? lines.join('\n') : null;
   }
 
-  private parseFrontmatter(raw: string): { description: string; whenToUse?: string; content: string } | null {
+  private parseFrontmatter(raw: string): { description: string; whenToUse?: string; alwaysOn: boolean; content: string } | null {
     const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-    if (!match) return { description: '', content: raw };
+    if (!match) return { description: '', alwaysOn: false, content: raw };
 
     const meta: Record<string, string> = {};
     for (const line of match[1].split('\n')) {
@@ -109,6 +127,7 @@ export class SkillLoader {
     return {
       description: meta.description || '',
       whenToUse: meta.when_to_use || undefined,
+      alwaysOn: meta.always_on === 'true',
       content: match[2].trim(),
     };
   }

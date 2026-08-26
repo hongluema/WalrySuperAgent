@@ -21,7 +21,7 @@ import {
 import { estimateMessageTokens } from './context/defense.js';
 import { UsageTracker } from './usage/tracker.js';
 import { MemoryStore } from './memory/store.js';
-import { memoryContext, ragContext } from './context/prompt-pipes.js';
+import { memoryContext, ragContext, tutorPedagogy } from './context/prompt-pipes.js';
 import { chunkDocument } from './rag/chunker.js';
 import { createMockEmbedder, createDashScopeEmbedder, embed } from './rag/embedder.js';
 import { VectorStore } from './rag/store.js';
@@ -145,6 +145,7 @@ registry.register(createSpawnTool(agentRegistry, getSpawnCtx));
 // ── Prompt Builder ────────────────────────────────────────
 const builder = new PromptBuilder()
   .pipe('coreRules', coreRules())
+  .pipe('tutorPedagogy', tutorPedagogy(skillLoader))
   .pipe('toolGuide', toolGuide())
   .pipe('deferredTools', deferredTools())
   .pipe('memoryContext', memoryContext(memoryStore))
@@ -292,6 +293,10 @@ export async function startAgent() {
   console.log('  /role [角色]      — 查看/切换角色');
   console.log('');
   console.log(`  当前角色: ${role}，可用工具: ${toolCount} 个`);
+  const alwaysOn = skillLoader.alwaysOnSkills();
+  if (alwaysOn.length > 0) {
+    console.log(`  教学法: ${alwaysOn.map(s => s.name).join(', ')} （始终启用，直接说「教我 XX」即可）`);
+  }
   console.log(`  Sub-Agent: 最大深度 ${agentRegistry.getConfig().maxSpawnDepth}，最大并发 ${agentRegistry.getConfig().maxConcurrent}`);
   console.log('');
   console.log('  试试：');
