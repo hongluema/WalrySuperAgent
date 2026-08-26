@@ -7,8 +7,10 @@
   },
   "scripts": {
     "start": "tsx src/index.ts",
+    "web": "tsx src/index.ts web",
     "init": "tsx src/index.ts init",
-    "continue": "tsx src/index.ts --continue"
+    "continue": "tsx src/index.ts --continue",
+    "test": "tsx --test src/web/app.test.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "2.0.44",

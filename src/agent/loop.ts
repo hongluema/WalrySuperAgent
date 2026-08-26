@@ -8,6 +8,14 @@ const MAX_STEPS = 30;
 const MAX_RETRIES = 3;
 const TOKEN_BUDGET = 200000;
 
+export type AgentLoopEvent =
+  | { type: 'text-delta'; text: string }
+  | { type: 'tool-call'; name: string; input: unknown }
+  | { type: 'tool-result'; name: string; preview: string }
+  | { type: 'error'; message: string };
+
+export type AgentLoopListener = (event: AgentLoopEvent) => void | Promise<void>;
+
 export async function agentLoop(
   model: any,
   registry: ToolRegistry,
@@ -17,6 +25,7 @@ export async function agentLoop(
   tag?: string,
   maxSteps?: number,
   signal?: AbortSignal,
+  onEvent?: AgentLoopListener,
 ) {
   let step = 0;
   let totalTokens = 0;
@@ -59,8 +68,11 @@ export async function agentLoop(
         for await (const part of result.fullStream) {
           switch (part.type) {
             case 'text-delta':
-              if (!tag) process.stdout.write(part.text);
+              if (!tag && !onEvent) process.stdout.write(part.text);
               fullText += part.text;
+              if (onEvent && part.text) {
+                await onEvent({ type: 'text-delta', text: part.text });
+              }
               break;
 
             case 'tool-call': {
@@ -70,6 +82,9 @@ export async function agentLoop(
                 console.log(`${prefix}调用 ${part.toolName}`);
               } else {
                 console.log(`  [调用: ${part.toolName}(${JSON.stringify(part.input)})]`);
+              }
+              if (onEvent) {
+                await onEvent({ type: 'tool-call', name: part.toolName, input: part.input });
               }
 
               const detection = detect(part.toolName, part.input);
@@ -95,6 +110,9 @@ export async function agentLoop(
               if (!tag) console.log(`  [结果: ${part.toolName}] ${preview}`);
               if (lastToolCall) {
                 recordResult(lastToolCall.name, lastToolCall.input, part.output);
+              }
+              if (onEvent) {
+                await onEvent({ type: 'tool-result', name: part.toolName, preview });
               }
               break;
             }
