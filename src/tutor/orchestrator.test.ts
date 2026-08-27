@@ -7,7 +7,7 @@ import { TutorOrchestrator } from "./orchestrator.js";
 import { TutorStore } from "./store.js";
 import type { TopicModel, TutorAnswerEvaluation, TutorEvent, TutorState, TutorTurnDecision } from "./types.js";
 import type { TutorModelClient } from "./model-client.js";
-import { normalizeDiagnosis, normalizeTopicModel } from "./model-client.js";
+import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
 import { buildEvidenceDrivenDecision, constrainEvaluationEvidence } from "./pedagogy.js";
 
@@ -171,6 +171,48 @@ test("rewrites machine option ids into sequential A/B/C/D labels", () => {
     ["A", "B", "C", "D"],
   );
   assert.equal(normalized.diagnosticDimensions[0].options[2].label, "先观察不打断，之后示范正确用法");
+});
+
+test("rewrites evaluation aliases into the closed schema before validation", () => {
+  const normalized = normalizeEvaluation({
+    intent: "answer",
+    understoodMeaning: "学生用生活例子说明了吸收性心智",
+    observations: [
+      "3岁前全盘吸收 -> 抓住了无意识吸收",
+      { quote: "教导其实没什么用" },
+    ],
+    assessment: {
+      status: "in_progress",
+      rubricEvidence: { accuracy: "提到了吸收", explained: "还没对比教导" },
+      evidence: [
+        { learnerQuote: "全盘吸收", criterion: "accuracy", strength: "partial" },
+        { quote: "教导没什么用", criterion: "explanation", strength: "none" },
+      ],
+    },
+    pedagogy: {
+      hit: ["全盘吸收"],
+      unpunched: ["有意识吸收"],
+      invented: [],
+      sourceMove: "补一层敏感期",
+    },
+    questionCandidates: [{
+      purpose: "explanation",
+      text: "幼儿学会母语口音和成人背单词有什么不同？",
+      thinkingHint: "对比有没有刻意记忆",
+    }],
+  }) as Record<string, any>;
+
+  assert.deepEqual(normalized.observations[0], { quote: "3岁前全盘吸收", implication: "抓住了无意识吸收" });
+  assert.equal(normalized.observations[1].implication, "诊断证据");
+  assert.equal(normalized.assessment.status, "partial");
+  assert.deepEqual(normalized.assessment.rubricEvidence, ["提到了吸收", "还没对比教导"]);
+  assert.equal(normalized.assessment.evidence[0].criterion, "accurate");
+  assert.equal(normalized.assessment.evidence[0].strength, "weak");
+  assert.equal(normalized.assessment.evidence[1].criterion, "explained");
+  assert.equal(normalized.assessment.evidence[1].learnerQuote, "教导没什么用");
+  assert.equal(normalized.pedagogy.hit, "全盘吸收");
+  assert.equal(normalized.pedagogy.invented, "");
+  assert.equal(normalized.questionCandidates[0].purpose, "explained");
 });
 
 test("normalizes loose diagnosis shapes before TutorDiagnosis validation", () => {

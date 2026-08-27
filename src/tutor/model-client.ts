@@ -183,11 +183,12 @@ const topicModelContract = {
 const answerEvaluationContract = {
   requiredFields: ["intent", "understoodMeaning", "observations", "assessment", "misconceptionUpdates", "pedagogy", "questionCandidates"],
   intentValues: ["answer", "dont_know", "no_doubts", "disagreement", "clarification", "direct_answer_request", "topic_switch", "meta_question", "stop"],
-  assessmentFields: ["status", "score?", "rubricEvidence", "evidence"],
-  evidenceFields: ["learnerQuote", "criterion", "strength", "confidence?"],
+  assessmentStatusValues: ["not-answered", "insufficient", "partial", "misconception", "mastered"],
+  assessmentFields: ["status", "score?", "rubricEvidence: string[]", "evidence"],
+  evidenceFields: ["learnerQuote", "criterion: accurate|explained|discrimination|transfer|performance", "strength: weak|sufficient", "confidence?"],
   misconceptionUpdateFields: ["description", "status: open|repaired", "evidenceQuote"],
-  pedagogyFields: ["hit", "unpunched", "invented", "sourceMove"],
-  questionCandidateFields: ["purpose", "text", "thinkingHint"],
+  pedagogyFields: ["hit: string", "unpunched: string", "invented: string", "sourceMove: string"],
+  questionCandidateFields: ["purpose: accurate|explained|discrimination|transfer|performance|introduce|doubt-check", "text", "thinkingHint"],
 };
 
 const diagnosisContract = {
@@ -267,6 +268,80 @@ function normalizeSkipSuggestion(item: unknown): { conceptId: string; reason: st
   const rawConfidence = textValue(source.confidence)?.toLowerCase();
   const confidence: "high" | "medium" = rawConfidence === "high" || rawConfidence === "高" ? "high" : "medium";
   return { conceptId, reason, confidence };
+}
+
+function asString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map((item) => textValue(item) ?? "").filter(Boolean).join("；");
+  return textValue(value) ?? "";
+}
+
+function asStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => textValue(item) ?? "").filter(Boolean);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).map((item) => textValue(item) ?? "").filter(Boolean);
+  const text = textValue(value);
+  return text ? [text] : [];
+}
+
+function mapCriterion(value: unknown): string | undefined {
+  const raw = textValue(value)?.toLowerCase().replace(/_/g, "-");
+  if (raw === "accuracy") return "accurate";
+  if (raw === "explanation") return "explained";
+  return raw;
+}
+
+function mapStrength(value: unknown): string | undefined {
+  const raw = textValue(value)?.toLowerCase();
+  if (raw === "partial" || raw === "none" || raw === "insufficient") return "weak";
+  return raw;
+}
+
+function mapStatus(value: unknown): string | undefined {
+  const raw = textValue(value)?.toLowerCase().replace(/_/g, "-");
+  if (raw === "in-progress") return "partial";
+  return raw;
+}
+
+export function normalizeEvaluation(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, any>;
+  const assessment = source.assessment ?? {};
+  const pedagogy = source.pedagogy ?? {};
+  const observationsRaw = source.observations ?? [];
+  const evidenceRaw = assessment.evidence ?? [];
+  const candidatesRaw = source.questionCandidates ?? [];
+  const updatesRaw = source.misconceptionUpdates ?? [];
+
+  return {
+    ...source,
+    understoodMeaning: textValue(source.understoodMeaning) ?? asString(source.understoodMeaning),
+    observations: (Array.isArray(observationsRaw) ? observationsRaw : [])
+      .map((item) => normalizeQuoteImplication(item))
+      .filter((item): item is { quote: string; implication: string } => Boolean(item)),
+    assessment: {
+      ...assessment,
+      status: mapStatus(assessment.status) ?? assessment.status,
+      rubricEvidence: asStringArray(assessment.rubricEvidence),
+      evidence: (Array.isArray(evidenceRaw) ? evidenceRaw : []).map((item: any) => ({
+        learnerQuote: textValue(item?.learnerQuote) ?? textValue(item?.quote) ?? asString(item?.learnerQuote),
+        criterion: mapCriterion(item?.criterion) ?? item?.criterion,
+        strength: mapStrength(item?.strength) ?? item?.strength,
+        confidence: typeof item?.confidence === "number" ? item.confidence : undefined,
+      })),
+    },
+    misconceptionUpdates: Array.isArray(updatesRaw) ? updatesRaw : [],
+    pedagogy: {
+      hit: asString(pedagogy.hit),
+      unpunched: asString(pedagogy.unpunched),
+      invented: asString(pedagogy.invented),
+      sourceMove: asString(pedagogy.sourceMove),
+    },
+    questionCandidates: (Array.isArray(candidatesRaw) ? candidatesRaw : []).map((item: any) => ({
+      purpose: mapCriterion(item?.purpose) ?? item?.purpose,
+      text: textValue(item?.text) ?? asString(item?.text),
+      thinkingHint: textValue(item?.thinkingHint) || "从刚才的原话里找还没说清的一层",
+    })),
+  };
 }
 
 function diagnosticKind(value: unknown, index: number): "baseline" | "motivation" | "focus" | "misconception" | "constraints" {
@@ -513,6 +588,7 @@ export class AiTutorModelClient implements TutorModelClient {
       schema: answerEvaluationSchema,
       signal: abortSignal,
       contract: answerEvaluationContract,
+      normalize: normalizeEvaluation,
       system: [
         "你是答案证据评估器，不负责决定教学阶段，不负责直接教学，也不能标记节点完成。",
         "只根据学生原话和给定 Rubric 评估可观察证据；不得替学生补全观点，不得因为表达流畅就判定掌握。",
