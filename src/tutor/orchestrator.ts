@@ -3,7 +3,7 @@ import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecis
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
-import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, hasAskedQuestion, withThinkingHint } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, hasAskedQuestion, nodeProgress, withThinkingHint } from "./pedagogy.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 
@@ -296,13 +296,21 @@ export class TutorOrchestrator {
       }
 
       state.turnCount += 1;
+      const taughtIndex = state.activeConcept;
       const decision = await this.decide(message, state, topicModel, emit, signal);
       state.lastDecision = decision;
       this.applyStatePatch(state, topicModel, decision);
       await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
-      if (decision.assessment.score !== undefined) {
-        await emit({ type: "assessment.updated", score: decision.assessment.score, status: decision.assessment.status === "mastered" ? "mastered" : "in-progress" });
-      }
+      const scoredIndex = decision.statePatch.masteredConceptId
+        ? topicModel.conceptRoute.findIndex((item) => item.id === decision.statePatch.masteredConceptId)
+        : taughtIndex;
+      const scoredNode = topicModel.conceptRoute[scoredIndex >= 0 ? scoredIndex : taughtIndex];
+      const progress = nodeProgress(
+        topicModel,
+        scoredIndex >= 0 ? scoredIndex : taughtIndex,
+        scoredNode ? state.nodeLearningStates[scoredNode.id] : undefined,
+      );
+      await emit({ type: "assessment.updated", score: progress.score, status: progress.status });
       const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
       this.recordQuestion(state, topicModel, decision, responseText);
       await this.persist(state, runId, emit);

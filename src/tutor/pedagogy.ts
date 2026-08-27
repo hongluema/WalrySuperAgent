@@ -53,6 +53,23 @@ function requiredCriteria(model: TopicModel, activeConcept: number): EvidenceCri
   return rubric?.performance?.trim() ? [...coreCriteria, "performance"] : coreCriteria;
 }
 
+export function nodeProgress(
+  model: TopicModel,
+  activeConcept: number,
+  nodeState?: NodeLearningState,
+): { score: number; status: "in-progress" | "mastered" } {
+  const required = requiredCriteria(model, activeConcept);
+  const sufficient = new Set(
+    (nodeState?.evidence ?? [])
+      .filter((item) => item.strength === "sufficient")
+      .map((item) => item.criterion),
+  );
+  const met = required.filter((criterion) => sufficient.has(criterion)).length;
+  const score = required.length === 0 ? 0 : Math.round((met / required.length) * 100);
+  if (nodeState?.stage === "mastered") return { score: 100, status: "mastered" };
+  return { score, status: "in-progress" };
+}
+
 function isEvidencePurpose(purpose: QuestionPurpose | undefined): purpose is EvidenceCriterion {
   return Boolean(purpose && coreCriteria.concat("performance").includes(purpose as EvidenceCriterion));
 }

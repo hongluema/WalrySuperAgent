@@ -10,7 +10,7 @@ import type { TutorModelClient } from "./model-client.js";
 import { loadAgentMd } from "../agent-md.js";
 import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
-import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, hasAskedQuestion, withThinkingHint } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, hasAskedQuestion, nodeProgress, withThinkingHint } from "./pedagogy.js";
 
 function fakeTopicModel(): TopicModel {
   return {
@@ -296,6 +296,43 @@ test("teaching questions carry a non-answer thinking direction", () => {
 
   assert.match(decision.responsePlan.question ?? "", /？（思路：[^）]+）$/u);
   assert.doesNotMatch(decision.responsePlan.question ?? "", /标准答案|答案是/u);
+});
+
+test("node progress score follows sufficient evidence on the current route node", () => {
+  const model = fakeTopicModel();
+  assert.deepEqual(nodeProgress(model, 0), { score: 0, status: "in-progress" });
+  assert.equal(nodeProgress(model, 0, {
+    nodeId: "concept-1",
+    stage: "elicit",
+    evidence: [
+      { learnerQuote: "微小事物敏感期", criterion: "accurate", strength: "sufficient" },
+      { learnerQuote: "嘴也算探索", criterion: "discrimination", strength: "weak" },
+    ],
+    misconceptions: [],
+    questionsAsked: [],
+  }).score, 25);
+  assert.deepEqual(nodeProgress(model, 0, {
+    nodeId: "concept-1",
+    stage: "elicit",
+    evidence: [
+      { learnerQuote: "微小事物敏感期", criterion: "accurate", strength: "sufficient" },
+      { learnerQuote: "手眼协调", criterion: "explained", strength: "sufficient" },
+    ],
+    misconceptions: [],
+    questionsAsked: [],
+  }), { score: 50, status: "in-progress" });
+  assert.deepEqual(nodeProgress(model, 0, {
+    nodeId: "concept-1",
+    stage: "mastered",
+    evidence: [
+      { learnerQuote: "准确", criterion: "accurate", strength: "sufficient" },
+      { learnerQuote: "解释", criterion: "explained", strength: "sufficient" },
+      { learnerQuote: "辨析", criterion: "discrimination", strength: "sufficient" },
+      { learnerQuote: "迁移", criterion: "transfer", strength: "sufficient" },
+    ],
+    misconceptions: [],
+    questionsAsked: [],
+  }), { score: 100, status: "mastered" });
 });
 
 test("an opening hint that already includes 思路 is wrapped only once", () => {
@@ -639,7 +676,12 @@ test("does not mark a node mastered without sufficient evidence in all core crit
       return evaluation;
     };
     const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
-    const emit = (): void => {};
+    const events: TutorEvent[] = [];
+    const emit = (event: TutorEvent): void => { events.push(event); };
+    const lastScore = () => {
+      const event = [...events].reverse().find((item) => item.type === "assessment.updated");
+      return event?.type === "assessment.updated" ? event : undefined;
+    };
 
     await tutor.run("mastery-session", "我想学习一个全新的对象", emit);
     await tutor.run("mastery-session", "完成诊断", emit, undefined, {
@@ -648,19 +690,27 @@ test("does not mark a node mastered without sufficient evidence in all core crit
     await tutor.run("mastery-session", "我能准确复述", emit);
     let state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
     assert.equal(state.roadmap[0].status, "active");
+    assert.equal(lastScore()?.score, 25);
+    assert.equal(lastScore()?.status, "in-progress");
 
     await tutor.run("mastery-session", "我能解释原因", emit);
+    assert.equal(lastScore()?.score, 50);
     await tutor.run("mastery-session", "我能辨析相近概念", emit);
+    assert.equal(lastScore()?.score, 75);
     await tutor.run("mastery-session", "我能迁移到新场景", emit);
     state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
     assert.equal(state.roadmap[0].status, "active");
     assert.equal(state.nodeLearningStates["concept-1"].stage, "doubt-check");
+    assert.equal(lastScore()?.score, 100);
+    assert.equal(lastScore()?.status, "in-progress");
 
     await tutor.run("mastery-session", "没有疑问了", emit);
     state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
     assert.equal(state.roadmap[0].status, "mastered");
     assert.equal(state.roadmap[1].status, "active");
     assert.equal(state.activeConcept, 1);
+    assert.equal(lastScore()?.score, 100);
+    assert.equal(lastScore()?.status, "mastered");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
