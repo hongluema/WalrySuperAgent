@@ -7,6 +7,7 @@ import { TutorOrchestrator } from "./orchestrator.js";
 import { TutorStore } from "./store.js";
 import type { TopicModel, TutorAnswerEvaluation, TutorEvent, TutorState, TutorTurnDecision } from "./types.js";
 import type { TutorModelClient } from "./model-client.js";
+import { loadAgentMd } from "../agent-md.js";
 import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
 import { buildEvidenceDrivenDecision, constrainEvaluationEvidence } from "./pedagogy.js";
@@ -124,6 +125,11 @@ test("routes systematic learning requests for any topic into the same tutor", ()
   assert.equal(tutor.isTutorIntent("我想学习写作"), true);
   assert.equal(tutor.isTutorIntent("今天天气怎么样"), false);
   assert.equal(tutor.isTutorIntent("我想学习 Vibe Coding"), true);
+});
+
+test("agent.md is loaded as simplified-Chinese operating rules", () => {
+  assert.match(loadAgentMd(), /简体中文/);
+  assert.match(loadAgentMd(), /评估器只抽学生原话证据/);
 });
 
 test("normalizes common model aliases before TopicModel validation", () => {

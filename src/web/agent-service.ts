@@ -8,6 +8,7 @@ import {
   sessionContext,
   toolGuide,
 } from "../context/prompt-builder.js";
+import { withAgentRules } from "../agent-md.js";
 import { loadConfig } from "../config/loader.js";
 import type { SuperAgentConfig } from "../config/schema.js";
 import { calculatorTool, weatherTool } from "../tools/utility-tools.js";
@@ -87,9 +88,9 @@ export class WebAgentService {
     this.tutor = new TutorOrchestrator(undefined, new AiTutorModelClient(this.model));
     this.promptBuilder = new PromptBuilder()
       .pipe(
-        "webRules",
-        () =>
-          "你是 Cheerful AI 的 Web Agent。只回答用户问题；不要尝试访问本地文件、执行命令或调用未提供的工具。回答清晰、诚实、简洁。",
+          "webRules",
+          () =>
+            withAgentRules("你是 Cheerful AI 的 Web Agent。只回答用户问题；不要尝试访问本地文件、执行命令或调用未提供的工具。回答清晰、诚实、简洁。"),
       )
       .pipe("toolGuide", toolGuide())
       .pipe("sessionContext", sessionContext());

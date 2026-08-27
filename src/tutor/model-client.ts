@@ -1,6 +1,7 @@
 import { generateText, streamText } from "ai";
 import { z } from "zod";
 import type { ModelMessage } from "ai";
+import { withAgentRules } from "../agent-md.js";
 import type { TopicModel, TutorAnswerEvaluation, TutorDiagnosis, TutorTurnDecision, TutorState } from "./types.js";
 
 const capabilityPlanSchema = z.object({
@@ -481,7 +482,7 @@ async function generateJson<T>(input: {
   const result = await generateText({
     model: input.model,
     abortSignal: input.signal,
-    system: `${input.system}\n只输出一个合法 JSON 对象，不要输出 Markdown、解释或代码围栏。`,
+    system: withAgentRules(`${input.system}\n只输出一个合法 JSON 对象，不要输出 Markdown、解释或代码围栏。`),
     prompt: input.prompt,
   });
 
@@ -492,7 +493,7 @@ async function generateJson<T>(input: {
     const retry = await generateText({
       model: input.model,
       abortSignal: input.signal,
-      system: "把用户提供的模型输出修复成符合要求的合法 JSON。只输出 JSON 对象，不要解释。",
+      system: withAgentRules("把用户提供的模型输出修复成符合要求的合法 JSON。只输出 JSON 对象，不要解释。自然语言字段使用简体中文。"),
       prompt: JSON.stringify({
         requiredContract: input.contract,
         originalOutput: result.text,
@@ -635,7 +636,7 @@ export class AiTutorModelClient implements TutorModelClient {
       model: this.model,
       abortSignal,
       maxRetries: 1,
-      system: [
+      system: withAgentRules([
         "你是一对一私教。根据教学诊断开口，不要暴露隐藏推理过程。",
         "teachingApproach 是诊断后形成的因材施教约束：必须从 startingPoint 开始，优先覆盖 emphasis，例子贴近 exampleContext，并按 pacing 控制深浅；不能生成了画像却仍按通用模板教学。",
         "结构：先回应对话中的原话（肯定 hit；把 unpunched 打透；invented 非空就当场叫停并纠正，那不是源材料里的东西），再只教 nextLayer / sourceMove 这一层，最后只问一个问题。只要仍处于 teach 阶段且不是 complete 或 switch-topic，老师就不能讲完停住。",
@@ -650,7 +651,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "首次进入节点（questionsAsked 为空且 questionPurpose 为 introduce）：先把 keyPoints / target 里不可推导的事实讲清楚，再问对比题，不要问课堂摘要。",
         "严格执行 forbiddenContent。不得一次总结整门课程，不得提前教授后续节点。",
         "如果用户表示不知道，降低难度并给例子；如果用户反驳，先承认并澄清，不要强行评价。",
-      ].join("\n"),
+      ].join("\n")),
       prompt: JSON.stringify({
         userMessage: input.message,
         phase: input.state.phase,
