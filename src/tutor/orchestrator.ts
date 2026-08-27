@@ -3,7 +3,7 @@ import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecis
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
-import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, hasAskedQuestion, nodeProgress, questionAlreadyAsked, withThinkingHint } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, questionAlreadyAsked, withThinkingHint } from "./pedagogy.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 
@@ -235,7 +235,9 @@ export class TutorOrchestrator {
         const introTrace = makeTrace(state, introDecision, introDecision.thinking ?? "");
         await emitThinking(emit, introTrace.rawThinking);
         await emit({ type: "reasoning.trace.ready", trace: introTrace });
-        await this.streamResponse(state, topicModel, introDecision, message, emit, signal);
+        await emit({ type: "message.delta", text: DIAGNOSE_INTRO_TEXT });
+        state.messages.push({ role: "assistant", content: DIAGNOSE_INTRO_TEXT });
+        state.lastDecision = introDecision;
         await this.persist(state, runId, emit);
         await emit({ type: "run.completed", runId });
         return;
@@ -441,10 +443,16 @@ export class TutorOrchestrator {
       text += fallback;
       await emit({ type: "message.delta", text: fallback });
     }
+    const cardShowsQuestion = state.phase === "diagnose" && state.diagnosticCards.length > 0;
     const plannedQuestion = decision.responsePlan.question || decision.pedagogy?.nextQuestion;
     const current = model.conceptRoute[state.activeConcept] ?? model.conceptRoute[0];
     const asked = current ? state.nodeLearningStates[current.id]?.questionsAsked ?? [] : [];
-    if (plannedQuestion && !hasAskedQuestion(text, plannedQuestion) && !questionAlreadyAsked(asked, plannedQuestion)) {
+    if (
+      plannedQuestion
+      && !cardShowsQuestion
+      && !hasAskedQuestion(text, plannedQuestion)
+      && !questionAlreadyAsked(asked, plannedQuestion)
+    ) {
       const questionSuffix = `${text.trim() ? "\n\n" : ""}${plannedQuestion}`;
       text += questionSuffix;
       await emit({ type: "message.delta", text: questionSuffix });

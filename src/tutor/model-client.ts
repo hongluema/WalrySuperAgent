@@ -66,7 +66,7 @@ const topicModelSchema = z.object({
     question: z.string(),
     thinkingHint: z.string().min(4),
     options: z.array(diagnosticOptionSchema).min(2).max(6),
-  })).min(4).max(6),
+  })).max(6).default([]),
   conceptRoute: z.array(z.object({
     id: z.string(),
     title: z.string(),
@@ -93,17 +93,6 @@ const topicModelSchema = z.object({
     limitations: z.array(z.string()),
   }),
   capabilities: capabilityPlanSchema,
-}).superRefine((model, context) => {
-  const kinds = new Set(model.diagnosticDimensions.map((item) => item.kind));
-  for (const required of ["baseline", "motivation", "focus"] as const) {
-    if (!kinds.has(required)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["diagnosticDimensions"],
-        message: `诊断必须包含 ${required} 维度`,
-      });
-    }
-  }
 });
 
 const diagnosisSchema = z.object({
@@ -172,8 +161,7 @@ function extractJson(text: string): string {
 }
 
 const topicModelContract = {
-  requiredFields: ["id", "topic", "lessonTitle", "coreOutcome", "backgroundBrief", "diagnosticDimensions", "conceptRoute", "boundaryCases", "practiceTarget", "rubricAnchors", "evidenceSources", "confidence", "subject", "grounding", "capabilities"],
-  diagnosticDimensionFields: ["id", "kind: baseline|motivation|focus|misconception|constraints", "tab", "rationale", "teachingUse", "question", "thinkingHint", "options: { id: A|B|C..., label }[]"],
+  requiredFields: ["id", "topic", "lessonTitle", "coreOutcome", "backgroundBrief", "conceptRoute", "boundaryCases", "practiceTarget", "rubricAnchors", "evidenceSources", "confidence", "subject", "grounding", "capabilities"],
   conceptRouteFields: ["id", "title", "target", "openingQuestion", "openingHint"],
   rubricFields: ["conceptId", "accuracy", "explanation", "discrimination", "transfer", "performance?"],
   subjectFields: ["kind", "description", "userGoal"],
@@ -207,10 +195,6 @@ function textValue(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return undefined;
-}
-
-function letterOptionId(index: number): string {
-  return String.fromCharCode(65 + index);
 }
 
 function normalizeQuoteImplication(item: unknown): { quote: string; implication: string } | undefined {
@@ -357,14 +341,6 @@ export function normalizeEvaluation(value: unknown): unknown {
   };
 }
 
-function diagnosticKind(value: unknown, index: number): "baseline" | "motivation" | "focus" | "misconception" | "constraints" {
-  const normalized = textValue(value)?.toLowerCase();
-  if (normalized === "baseline" || normalized === "motivation" || normalized === "focus" || normalized === "misconception" || normalized === "constraints") {
-    return normalized;
-  }
-  return (["baseline", "motivation", "focus", "misconception", "constraints"] as const)[Math.min(index, 4)];
-}
-
 export function normalizeDiagnosis(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, any>;
@@ -403,7 +379,6 @@ export function normalizeDiagnosis(value: unknown): unknown {
 export function normalizeTopicModel(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, any>;
-  const dimensions = source.diagnosticDimensions ?? source.diagnostics ?? source.dimensions ?? [];
   const route = source.conceptRoute ?? source.learningRoute ?? source.learningPath ?? source.route ?? source.concepts ?? [];
   const boundaryCases = source.boundaryCases ?? source.boundaries ?? source.edgeCases ?? [];
   const rubrics = source.rubricAnchors ?? source.rubrics ?? source.masteryRubrics ?? [];
@@ -423,22 +398,7 @@ export function normalizeTopicModel(value: unknown): unknown {
     lessonTitle,
     coreOutcome,
     backgroundBrief,
-    diagnosticDimensions: Array.isArray(dimensions) ? dimensions.map((item: any, index: number) => {
-      const options = item?.options ?? item?.choices ?? item?.answers ?? [];
-      return {
-        id: textValue(item?.id) ?? textValue(item?.key) ?? `dimension-${index + 1}`,
-        kind: diagnosticKind(item?.kind ?? item?.type ?? item?.aspect, index),
-        tab: textValue(item?.tab) ?? textValue(item?.name) ?? textValue(item?.title) ?? textValue(item?.dimension) ?? `学习维度 ${index + 1}`,
-        rationale: textValue(item?.rationale) ?? textValue(item?.reason) ?? "这个信息会影响讲解起点、重点或练习方式",
-        teachingUse: textValue(item?.teachingUse) ?? textValue(item?.use) ?? textValue(item?.impact) ?? "根据答案调整后续教学的深浅和侧重",
-        question: textValue(item?.question) ?? textValue(item?.prompt) ?? textValue(item?.description) ?? textValue(item?.goal) ?? textValue(item?.问题),
-        thinkingHint: textValue(item?.thinkingHint) ?? textValue(item?.hint) ?? "按你目前最真实的情况选择，不需要猜标准答案",
-        options: Array.isArray(options) ? options.map((option: any, optionIndex: number) => ({
-          id: letterOptionId(optionIndex),
-          label: textValue(option?.label) ?? textValue(option?.text) ?? textValue(option?.description) ?? textValue(option?.内容),
-        })) : options,
-      };
-    }) : dimensions,
+    diagnosticDimensions: [],
     conceptRoute: Array.isArray(route) ? route.map((item: any, index: number) => ({
       id: textValue(item?.id) ?? textValue(item?.key) ?? `concept-${index + 1}`,
       title: textValue(item?.title) ?? textValue(item?.name) ?? textValue(item?.concept) ?? textValue(item?.label) ?? textValue(item?.名称),
@@ -539,17 +499,11 @@ export class AiTutorModelClient implements TutorModelClient {
         "忠于用户原始学习对象和目标，不得擅自扩张成更大的领域课程、考试课或项目课。",
         "只有真实提供或检索到的来源 verified 才能为 true；模型已有知识不是已验证研究。",
         "materials 非空时，它们是真实取得的搜索结果或用户材料。课程背景、核心内容、路线和例子必须优先以 materials 为依据，不得只凭模型记忆另起一套内容。",
-        "先真正理解这个学习主题是什么、能解决什么问题、典型使用场景和边界，再决定为了教好它需要先了解学生哪些方面；不能先套一组固定题再往主题里填词。",
+        "不要设计摸底题，也不要返回 diagnosticDimensions。摸底问卷由系统按固定协议根据路线节点和边界案例生成。",
         "backgroundBrief 必须是一段可独立阅读的主题摘要，建议 300-600 个中文字符。读者只读这一段，也应大致知道：主题是什么、为何产生或要解决什么问题、核心组成/机制、典型用途、适用边界，以及接下来会学什么。不能只写两三句定义。",
         "每个路线节点的 target 必须写出进入教学时要介绍的具体背景、核心内容或例子，不能只写‘理解某概念’之类的抽象目标。",
         "每个路线节点都必须预先设计 openingQuestion 和 openingHint。openingQuestion 是老师讲完该节点第一个最小知识块后，用来摸学生当前理解的主题专属问题；应要求判断、比较、解释或联系真实场景，不能让学生复述摘要。openingHint 只给思考入口，不能泄露答案。",
         "核心概念必须在节点标题中明确出现，不能藏在‘基础知识’‘重要性’等泛化标题下。",
-        "像专业私教一样设计 4-5 道高信息量摸底题：必须覆盖 baseline（了解程度/既往经验）、motivation（学习动机/未来用途）、focus（最想深入的内容侧重）；再按主题需要选择 misconception（真实判断/常见误区）或 constraints（时间、工具、场景等约束）。",
-        "每道题都必须填写 rationale（为什么一个好老师需要知道它）和 teachingUse（不同回答会怎样改变后续讲解、案例或练习），避免收集不会影响教学的无用信息。",
-        "baseline 不能只让学生自评分数，至少结合一次既往接触、口头理解或真实判断校准。至少一题要求用户完成真实判断，不要全部使用自我评价题，也不要在诊断前泄露答案。",
-        "当前诊断卡只支持单选：每题必须能仅靠选择一个 option 完整作答，禁止要求额外写一句话、补充说明、多选或选择 1-2 项。需要校准理解时，用单独的 misconception 真实判断题完成。",
-        "每道诊断题的 options.id 必须按出现顺序依次为 A、B、C、D（最多到 F）。id 是给学习者看的选项序号，禁止使用 opt-misc-1、choice_1 这类内部键。",
-        "每道诊断题提供 thinkingHint：只指出回忆或思考方向，不暗示正确选项，不替学生作答。",
         `路线节点必须是学习对象本身的知识/内容节点。判断标准：去掉这个节点后，学习者对该领域的理解是否有实质缺失？\u201C明确学习目标\u201D\u201C批判性思考\u201D\u201C形成应用清单\u201D等属于教学技法，应融入内容节点的教学过程，不作为独立节点。`,
         "对于有明确源材料的学习（书/论文/代码库），路线应忠于源材料自身的结构。",
         "路线必须服务于用户目标，不能把不相关主题的模板套进来。",
@@ -658,7 +612,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "questionPurpose=doubt-check 时只能使用给定的疑问检查问题，不得再加考核题。整条回复最多出现一个问号。",
         "禁止摘要题（最关键的区别 / 机制 / 作用是什么）。禁止复述题（再用一句话说明为什么会产生这种结果）。禁止同义反复上一问。",
         "questionsAsked 非空或 pedagogy.restatedBiography 为 false 时，禁止重讲人物背景、传记或节点开场故事。",
-        "诊断开场（teachingAtom 含“诊断”或 phase 为 diagnose）：只用 1-2 句说明要摸底，立刻问诊断题。禁止讲解 coreOutcome，禁止给出定义或答案。",
+        "诊断开场（teachingAtom 含“诊断”或 phase 为 diagnose）：只用 1-2 句说明要摸底。禁止提问，禁止列出 A/B/C/D 选项，禁止重复诊断卡题干。题目和选项只出现在诊断卡上。禁止讲解 coreOutcome，禁止给出定义或答案。",
         "首次正式教学且 responsePlan.backgroundBrief 非空时，先输出“主题背景”，完整讲清该摘要，再进入第一个知识节点；不能把背景压缩成几句开场白，也不要重复整条学习路线。",
         "首次进入节点（questionsAsked 为空且 questionPurpose 为 introduce）：先把 keyPoints / target 里不可推导的事实讲清楚，再问对比题，不要问课堂摘要。",
         "严格执行 forbiddenContent。不得一次总结整门课程，不得提前教授后续节点。",

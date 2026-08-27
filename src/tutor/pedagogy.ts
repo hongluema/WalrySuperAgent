@@ -442,6 +442,19 @@ export function buildEvidenceDrivenDecision(input: EvidenceDrivenDecisionInput):
   };
 }
 
+export const DIAGNOSE_INTRO_TEXT = "为了更好地为你定制学习内容与节奏，我们先进行一个简短的摸底。";
+
+const choiceOptionLine = /^\s*[A-F][\.．、)）]\s+\S/u;
+
+export function stripChoiceOptionLines(text: string): string {
+  return text
+    .split(/\n/)
+    .filter((line) => !choiceOptionLine.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function buildIntroDecision(model: TopicModel, firstQuestion?: string): TutorTurnDecision {
   return {
     intent: "answer",
@@ -451,12 +464,12 @@ export function buildIntroDecision(model: TopicModel, firstQuestion?: string): T
     nextAction: "ask-socratic-question",
     statePatch: {},
     responsePlan: {
-      goal: `用一两句话说明接下来要摸底，然后立刻提出第一道诊断题`,
+      goal: `用一两句话说明接下来要摸底；题目和选项只出现在诊断卡上`,
       teachingAtom: "诊断开场",
       gapToRepair: "尚无学习者起点证据",
-      keyPoints: ["用一两句话说明接下来要摸底，立刻提出第一道诊断题"],
-      allowedContent: ["第一道诊断问题"],
-      forbiddenContent: ["完整课程讲解", "替学习者做诊断结论", "诊断题的答案或定义", "核心结论"],
+      keyPoints: ["用一两句话说明接下来要摸底", "不要在正文出题或列出 A/B/C/D"],
+      allowedContent: ["摸底说明"],
+      forbiddenContent: ["完整课程讲解", "替学习者做诊断结论", "诊断题的答案或定义", "核心结论", "列出诊断选项", "重复诊断卡题干"],
       question: firstQuestion,
     },
     pedagogy: {

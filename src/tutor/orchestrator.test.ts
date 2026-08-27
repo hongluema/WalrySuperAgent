@@ -10,7 +10,11 @@ import type { TutorModelClient } from "./model-client.js";
 import { loadAgentMd } from "../agent-md.js";
 import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
-import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, hasAskedQuestion, nodeProgress, withThinkingHint } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, stripChoiceOptionLines, withThinkingHint } from "./pedagogy.js";
+
+function protocolAnswers(overrides: Record<string, string> = {}) {
+  return { baseline: "B", motivation: "B", focus: "B", misconception: "C", ...overrides };
+}
 
 function fakeTopicModel(): TopicModel {
   return {
@@ -143,11 +147,7 @@ test("normalizes common model aliases before TopicModel validation", () => {
   }) as Record<string, any>;
   assert.equal(normalized.lessonTitle, "AI 漫剧制作");
   assert.match(normalized.backgroundBrief, /AI 漫剧制作/);
-  assert.equal(normalized.diagnosticDimensions[0].tab, "已有经验");
-  assert.equal(normalized.diagnosticDimensions[0].kind, "baseline");
-  assert.match(normalized.diagnosticDimensions[0].thinkingHint, /真实的情况/);
-  assert.equal(normalized.diagnosticDimensions[0].options[0].id, "A");
-  assert.equal(normalized.diagnosticDimensions[0].options[1].id, "B");
+  assert.deepEqual(normalized.diagnosticDimensions, []);
   assert.equal(normalized.conceptRoute[0].target, "把故事拆成可执行分镜");
   assert.match(normalized.conceptRoute[0].openingQuestion, /剧本拆解/);
   assert.match(normalized.conceptRoute[0].openingHint, /可执行分镜/);
@@ -157,26 +157,34 @@ test("normalizes common model aliases before TopicModel validation", () => {
   assert.deepEqual(normalized.capabilities.missing, []);
 });
 
-test("rewrites machine option ids into sequential A/B/C/D labels", () => {
-  const normalized = normalizeTopicModel({
-    diagnostics: [{
-      name: "常见误区",
-      kind: "misconception",
-      prompt: "孩子把粉红塔当火车怎么处理？",
-      choices: [
-        { id: "opt-misc-1", text: "立刻制止并没收" },
-        { id: "opt-misc-2", text: "不干预并夸奖创意" },
-        { id: "opt-misc-3", text: "先观察不打断，之后示范正确用法" },
-        { id: "opt-misc-4", text: "当众批评以立规矩" },
-      ],
-    }],
-  }) as Record<string, any>;
+test("diagnostic protocol is determined by route and boundary, not by invented questions", () => {
+  const invented = fakeTopicModel();
+  invented.diagnosticDimensions = [{
+    id: "opt-misc-1",
+    kind: "misconception",
+    tab: "粉红塔火车",
+    rationale: "现场出卷",
+    teachingUse: "每次都不一样",
+    question: "孩子把粉红塔当火车怎么处理？",
+    thinkingHint: "猜一个老师想听的答案",
+    options: [
+      { id: "opt-misc-1", label: "立刻制止并没收" },
+      { id: "opt-misc-2", label: "不干预并夸奖创意" },
+    ],
+  }];
+  const empty = fakeTopicModel();
+  empty.diagnosticDimensions = [];
+  const a = ensureTopicModelDefaults(invented);
+  const b = ensureTopicModelDefaults(empty);
 
+  assert.deepEqual(a.diagnosticDimensions.map((item) => item.kind), ["baseline", "motivation", "focus", "misconception"]);
+  assert.deepEqual(a.diagnosticDimensions, b.diagnosticDimensions);
+  assert.deepEqual(a.diagnosticDimensions.find((item) => item.kind === "focus")?.options.map((item) => item.label), ["第一个概念", "第二个概念"]);
+  assert.match(a.diagnosticDimensions.find((item) => item.kind === "misconception")?.question ?? "", /概念理解不等于能够迁移/);
   assert.deepEqual(
-    normalized.diagnosticDimensions[0].options.map((item: { id: string; label: string }) => item.id),
+    a.diagnosticDimensions[0].options.map((item) => item.id),
     ["A", "B", "C", "D"],
   );
-  assert.equal(normalized.diagnosticDimensions[0].options[2].label, "先观察不打断，之后示范正确用法");
 });
 
 test("rewrites evaluation aliases into the closed schema before validation", () => {
@@ -508,7 +516,7 @@ test("runs the diagnostic journey and persists resumable state", async () => {
 
     events.length = 0;
     await tutor.run("test-session", "完成诊断", emit, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
 
     assert.ok(events.some((event) => event.type === "diagnosis.ready"));
@@ -525,8 +533,8 @@ test("runs the diagnostic journey and persists resumable state", async () => {
     const state = JSON.parse(await readFile(join(root, "sessions", "test-session.json"), "utf8")) as { schemaVersion: number; phase: string; currentCard: number; learnerProfile: string[] };
     assert.equal(state.schemaVersion, 4);
     assert.equal(state.phase, "teach");
-    assert.equal(state.currentCard, 2);
-    assert.ok(state.learnerProfile.some((item) => item.includes("没做过")));
+    assert.equal(state.currentCard, 3);
+    assert.ok(state.learnerProfile.some((item) => item.includes("没有自己实践过")));
     assert.match(await readFile(join(root, "events", "test-session.jsonl"), "utf8"), /state\.saved/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -543,9 +551,10 @@ test("diagnostic design covers learner baseline, motivation and focus with teach
     const ready = events.find((event) => event.type === "diagnostic.cards.ready");
     assert.equal(ready?.type, "diagnostic.cards.ready");
     if (ready?.type === "diagnostic.cards.ready") {
-      assert.deepEqual(ready.cards.map((card) => card.kind), ["baseline", "motivation", "focus"]);
+      assert.deepEqual(ready.cards.map((card) => card.kind), ["baseline", "motivation", "focus", "misconception"]);
       assert.ok(ready.cards.every((card) => card.rationale.trim() && card.teachingUse.trim()));
       assert.ok(ready.cards.every((card) => /（思路：[^）]+）$/u.test(card.question)));
+      assert.deepEqual(ready.cards.find((card) => card.kind === "focus")?.options.map((item) => item.label), ["第一个概念", "第二个概念"]);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -640,7 +649,7 @@ test("starts story nodes with grounded content instead of asking for unknown fac
 
     await tutor.run("story-session", "我想学习一部作品", () => {});
     await tutor.run("story-session", "完成诊断", () => {}, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
 
     const state = JSON.parse(await readFile(join(root, "sessions", "story-session.json"), "utf8")) as TutorState;
@@ -677,7 +686,7 @@ test("any topic uses the same dynamic diagnostic protocol", async () => {
 
     events.length = 0;
     await tutor.run("writing-session", "完成诊断", emit, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
     assert.ok(events.some((event) => event.type === "diagnosis.ready"));
     assert.ok(events.some((event) => event.type === "topic.background.ready" && event.summary === fakeTopicModel().backgroundBrief));
@@ -743,7 +752,7 @@ test("does not mark a node mastered without sufficient evidence in all core crit
 
     await tutor.run("mastery-session", "我想学习一个全新的对象", emit);
     await tutor.run("mastery-session", "完成诊断", emit, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
     await tutor.run("mastery-session", "我能准确复述", emit);
     let state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
@@ -780,7 +789,7 @@ test("saying dont know raises the hint level without creating mastery evidence",
     const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
     await tutor.run("hint-session", "我想学习一个全新的对象", () => {});
     await tutor.run("hint-session", "完成诊断", () => {}, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
 
     await tutor.run("hint-session", "不知道", () => {});
@@ -794,23 +803,48 @@ test("saying dont know raises the hint level without creating mastery evidence",
   }
 });
 
-test("diagnostic intro does not leak the core outcome or answers", async () => {
+test("strips streamed A/B/C/D option lists out of diagnose intro copy", () => {
+  const leaked = [
+    "为了更好地为你定制学习内容与节奏，我们先进行一个简短的摸底。",
+    "",
+    "A. 零基础，只听过名字",
+    "B. 接触过零散概念（如敏感期、蒙氏教具等）",
+    "C. 读过相关书籍或在家庭中有初步实践",
+    "D. 系统学习过或具备相关教育从业经验",
+    "",
+    "你目前和「蒙氏教育」的真实接触到哪一步了？",
+  ].join("\n");
+  const cleaned = stripChoiceOptionLines(leaked);
+  assert.doesNotMatch(cleaned, /^[A-D][\.．、]/m);
+  assert.match(cleaned, /简短的摸底/);
+});
+
+test("diagnostic intro does not leak the core outcome, options, or card question into prose", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-intro-leak-test-"));
   try {
     const client = fakeModelClient();
-    let intro: TutorTurnDecision | undefined;
+    let streamed = false;
     client.streamResponse = async ({ decision }, onDelta) => {
-      intro = decision;
-      await onDelta(decision.responsePlan.goal);
-      return decision.responsePlan.goal;
+      streamed = true;
+      await onDelta(`A. 零基础\nB. 接触过概念\n${decision.responsePlan.question}`);
+      return `A. 零基础\nB. 接触过概念\n${decision.responsePlan.question}`;
     };
     const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
-    await tutor.run("intro-session", "我想学习一个全新的对象", () => {});
+    const events: TutorEvent[] = [];
+    await tutor.run("intro-session", "我想学习一个全新的对象", (event) => { events.push(event); });
 
-    assert.ok(intro);
-    assert.equal(intro.responsePlan.question, "你做过什么？（思路：回忆你是否接触或实践过类似内容）");
-    assert.ok(!intro.responsePlan.keyPoints.some((item) => item.includes("能够理解核心概念并在新场景中独立应用")));
-    assert.ok(intro.responsePlan.forbiddenContent.some((item) => /答案|定义|coreOutcome|核心结论/.test(item)));
+    assert.equal(streamed, false);
+    const state = JSON.parse(await readFile(join(root, "sessions", "intro-session.json"), "utf8")) as TutorState;
+    assert.equal(state.messages.at(-1)?.content, DIAGNOSE_INTRO_TEXT);
+    assert.doesNotMatch(state.messages.at(-1)?.content ?? "", /^[A-D][\.．、]/m);
+    assert.doesNotMatch(state.messages.at(-1)?.content ?? "", /真实接触到哪一步了/);
+    assert.ok(!state.lastDecision?.responsePlan.keyPoints.some((item) => item.includes("能够理解核心概念并在新场景中独立应用")));
+    assert.ok(state.lastDecision?.responsePlan.forbiddenContent.some((item) => /列出诊断选项|重复诊断卡题干/.test(item)));
+    const cards = events.find((event) => event.type === "diagnostic.cards.ready");
+    assert.equal(cards?.type, "diagnostic.cards.ready");
+    if (cards?.type === "diagnostic.cards.ready") {
+      assert.match(cards.cards[0].question, /真实接触到哪一步了/);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -824,7 +858,7 @@ test("decision fallback keeps teaching from the learner quote instead of asking 
 
     await tutor.run("teach-fallback-session", "我想学习一个全新的对象", () => {});
     await tutor.run("teach-fallback-session", "完成诊断", () => {}, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
 
     client.evaluateAnswer = async () => { throw new Error("结构化输出校验失败"); };
@@ -865,7 +899,7 @@ test("degrades model failures without failing or losing the teaching turn", asyn
 
     await tutor.run("fallback-session", "我想学习一个全新的对象", () => {});
     await tutor.run("fallback-session", "完成诊断", () => {}, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
 
     client.evaluateAnswer = async () => { throw new Error("结构化输出校验失败"); };
@@ -909,7 +943,7 @@ test("diagnostic suggestions do not skip content nodes", async () => {
     await tutor.run("skip-session", "我想学习一个有基础的主题", emit);
     events.length = 0;
     await tutor.run("skip-session", "完成诊断", emit, undefined, {
-      diagnosticAnswers: { experience: "A", understanding: "A", transfer: "B" },
+      diagnosticAnswers: protocolAnswers({ baseline: "A", motivation: "A", focus: "B" }),
     });
 
     const state = JSON.parse(await readFile(join(root, "sessions", "skip-session.json"), "utf8")) as TutorState;
@@ -932,7 +966,7 @@ test("streams an auditable evidence-and-action trace instead of hidden chain of 
     const tutor = new TutorOrchestrator(new TutorStore(root), client, async () => "没有找到相关结果");
     await tutor.run("raw-thinking-session", "我想学习一个全新的对象", () => {});
     await tutor.run("raw-thinking-session", "完成诊断", () => {}, undefined, {
-      diagnosticAnswers: { experience: "B", understanding: "B", transfer: "B" },
+      diagnosticAnswers: protocolAnswers(),
     });
 
     const events: TutorEvent[] = [];
@@ -969,7 +1003,7 @@ test("does not skip a core node from diagnostic multiple-choice answers", async 
 
     await tutor.run("core-node-session", "我想学习一个核心主题", () => {});
     await tutor.run("core-node-session", "完成诊断", () => {}, undefined, {
-      diagnosticAnswers: { experience: "A", understanding: "A", transfer: "A" },
+      diagnosticAnswers: protocolAnswers({ baseline: "A", motivation: "A", focus: "A" }),
     });
 
     const state = JSON.parse(await readFile(join(root, "sessions", "core-node-session.json"), "utf8")) as TutorState;
