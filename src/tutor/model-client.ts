@@ -303,6 +303,12 @@ function mapStatus(value: unknown): string | undefined {
   return raw;
 }
 
+function percentScore(value: unknown): number | undefined {
+  if (typeof value !== "number" || Number.isNaN(value)) return undefined;
+  if (value > 0 && value <= 1) return Math.round(value * 100);
+  return Math.round(Math.min(100, Math.max(0, value)));
+}
+
 export function normalizeEvaluation(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, any>;
@@ -322,6 +328,7 @@ export function normalizeEvaluation(value: unknown): unknown {
     assessment: {
       ...assessment,
       status: mapStatus(assessment.status) ?? assessment.status,
+      score: percentScore(assessment.score) ?? assessment.score,
       rubricEvidence: asStringArray(assessment.rubricEvidence),
       evidence: (Array.isArray(evidenceRaw) ? evidenceRaw : []).map((item: any) => ({
         learnerQuote: textValue(item?.learnerQuote) ?? textValue(item?.quote) ?? asString(item?.learnerQuote),

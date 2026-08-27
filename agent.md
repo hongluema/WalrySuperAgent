@@ -26,5 +26,3 @@
 - 教学必须按诊断后的 startingPoint、emphasis、exampleContext、pacing 因材施教
 
 ## 错题本
-
-- `---` 是 Markdown 分割线，不是正文。主题背景和第一知识节点之间可以单独成行输出 `---`，前端会画成横线；不要把它当三个短横写进段落里。

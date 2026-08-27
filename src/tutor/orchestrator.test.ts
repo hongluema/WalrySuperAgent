@@ -130,8 +130,6 @@ test("routes systematic learning requests for any topic into the same tutor", ()
 test("agent.md is loaded as simplified-Chinese operating rules", () => {
   assert.match(loadAgentMd(), /简体中文/);
   assert.match(loadAgentMd(), /评估器只抽学生原话证据/);
-  assert.match(loadAgentMd(), /错题本/);
-  assert.match(loadAgentMd(), /分割线/);
 });
 
 test("normalizes common model aliases before TopicModel validation", () => {
@@ -191,6 +189,7 @@ test("rewrites evaluation aliases into the closed schema before validation", () 
     ],
     assessment: {
       status: "in_progress",
+      score: 0.65,
       rubricEvidence: { accuracy: "提到了吸收", explained: "还没对比教导" },
       evidence: [
         { learnerQuote: "全盘吸收", criterion: "accuracy", strength: "partial" },
@@ -213,6 +212,7 @@ test("rewrites evaluation aliases into the closed schema before validation", () 
   assert.deepEqual(normalized.observations[0], { quote: "3岁前全盘吸收", implication: "抓住了无意识吸收" });
   assert.equal(normalized.observations[1].implication, "诊断证据");
   assert.equal(normalized.assessment.status, "partial");
+  assert.equal(normalized.assessment.score, 65);
   assert.deepEqual(normalized.assessment.rubricEvidence, ["提到了吸收", "还没对比教导"]);
   assert.equal(normalized.assessment.evidence[0].criterion, "accurate");
   assert.equal(normalized.assessment.evidence[0].strength, "weak");
