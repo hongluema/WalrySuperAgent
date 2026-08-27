@@ -130,6 +130,8 @@ test("routes systematic learning requests for any topic into the same tutor", ()
 test("agent.md is loaded as simplified-Chinese operating rules", () => {
   assert.match(loadAgentMd(), /简体中文/);
   assert.match(loadAgentMd(), /评估器只抽学生原话证据/);
+  assert.match(loadAgentMd(), /错题本/);
+  assert.match(loadAgentMd(), /分割线/);
 });
 
 test("normalizes common model aliases before TopicModel validation", () => {
