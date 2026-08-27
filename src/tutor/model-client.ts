@@ -172,7 +172,7 @@ function extractJson(text: string): string {
 
 const topicModelContract = {
   requiredFields: ["id", "topic", "lessonTitle", "coreOutcome", "backgroundBrief", "diagnosticDimensions", "conceptRoute", "boundaryCases", "practiceTarget", "rubricAnchors", "evidenceSources", "confidence", "subject", "grounding", "capabilities"],
-  diagnosticDimensionFields: ["id", "kind: baseline|motivation|focus|misconception|constraints", "tab", "rationale", "teachingUse", "question", "thinkingHint", "options: { id, label }[]"],
+  diagnosticDimensionFields: ["id", "kind: baseline|motivation|focus|misconception|constraints", "tab", "rationale", "teachingUse", "question", "thinkingHint", "options: { id: A|B|C..., label }[]"],
   conceptRouteFields: ["id", "title", "target", "openingQuestion", "openingHint"],
   rubricFields: ["conceptId", "accuracy", "explanation", "discrimination", "transfer", "performance?"],
   subjectFields: ["kind", "description", "userGoal"],
@@ -205,6 +205,10 @@ function textValue(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return undefined;
+}
+
+function letterOptionId(index: number): string {
+  return String.fromCharCode(65 + index);
 }
 
 function normalizeQuoteImplication(item: unknown): { quote: string; implication: string } | undefined {
@@ -342,7 +346,7 @@ export function normalizeTopicModel(value: unknown): unknown {
         question: textValue(item?.question) ?? textValue(item?.prompt) ?? textValue(item?.description) ?? textValue(item?.goal) ?? textValue(item?.问题),
         thinkingHint: textValue(item?.thinkingHint) ?? textValue(item?.hint) ?? "按你目前最真实的情况选择，不需要猜标准答案",
         options: Array.isArray(options) ? options.map((option: any, optionIndex: number) => ({
-          id: textValue(option?.id) ?? textValue(option?.key) ?? String.fromCharCode(65 + optionIndex),
+          id: letterOptionId(optionIndex),
           label: textValue(option?.label) ?? textValue(option?.text) ?? textValue(option?.description) ?? textValue(option?.内容),
         })) : options,
       };
@@ -456,6 +460,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "每道题都必须填写 rationale（为什么一个好老师需要知道它）和 teachingUse（不同回答会怎样改变后续讲解、案例或练习），避免收集不会影响教学的无用信息。",
         "baseline 不能只让学生自评分数，至少结合一次既往接触、口头理解或真实判断校准。至少一题要求用户完成真实判断，不要全部使用自我评价题，也不要在诊断前泄露答案。",
         "当前诊断卡只支持单选：每题必须能仅靠选择一个 option 完整作答，禁止要求额外写一句话、补充说明、多选或选择 1-2 项。需要校准理解时，用单独的 misconception 真实判断题完成。",
+        "每道诊断题的 options.id 必须按出现顺序依次为 A、B、C、D（最多到 F）。id 是给学习者看的选项序号，禁止使用 opt-misc-1、choice_1 这类内部键。",
         "每道诊断题提供 thinkingHint：只指出回忆或思考方向，不暗示正确选项，不替学生作答。",
         `路线节点必须是学习对象本身的知识/内容节点。判断标准：去掉这个节点后，学习者对该领域的理解是否有实质缺失？\u201C明确学习目标\u201D\u201C批判性思考\u201D\u201C形成应用清单\u201D等属于教学技法，应融入内容节点的教学过程，不作为独立节点。`,
         "对于有明确源材料的学习（书/论文/代码库），路线应忠于源材料自身的结构。",

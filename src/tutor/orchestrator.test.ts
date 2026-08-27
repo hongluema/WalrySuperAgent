@@ -141,6 +141,7 @@ test("normalizes common model aliases before TopicModel validation", () => {
   assert.equal(normalized.diagnosticDimensions[0].kind, "baseline");
   assert.match(normalized.diagnosticDimensions[0].thinkingHint, /真实的情况/);
   assert.equal(normalized.diagnosticDimensions[0].options[0].id, "A");
+  assert.equal(normalized.diagnosticDimensions[0].options[1].id, "B");
   assert.equal(normalized.conceptRoute[0].target, "把故事拆成可执行分镜");
   assert.match(normalized.conceptRoute[0].openingQuestion, /剧本拆解/);
   assert.match(normalized.conceptRoute[0].openingHint, /可执行分镜/);
@@ -148,6 +149,28 @@ test("normalizes common model aliases before TopicModel validation", () => {
   assert.equal(normalized.rubricAnchors[0].transfer, "能迁移应用");
   assert.equal(normalized.subject.kind, "open-learning-subject");
   assert.deepEqual(normalized.capabilities.missing, []);
+});
+
+test("rewrites machine option ids into sequential A/B/C/D labels", () => {
+  const normalized = normalizeTopicModel({
+    diagnostics: [{
+      name: "常见误区",
+      kind: "misconception",
+      prompt: "孩子把粉红塔当火车怎么处理？",
+      choices: [
+        { id: "opt-misc-1", text: "立刻制止并没收" },
+        { id: "opt-misc-2", text: "不干预并夸奖创意" },
+        { id: "opt-misc-3", text: "先观察不打断，之后示范正确用法" },
+        { id: "opt-misc-4", text: "当众批评以立规矩" },
+      ],
+    }],
+  }) as Record<string, any>;
+
+  assert.deepEqual(
+    normalized.diagnosticDimensions[0].options.map((item: { id: string; label: string }) => item.id),
+    ["A", "B", "C", "D"],
+  );
+  assert.equal(normalized.diagnosticDimensions[0].options[2].label, "先观察不打断，之后示范正确用法");
 });
 
 test("normalizes loose diagnosis shapes before TutorDiagnosis validation", () => {
