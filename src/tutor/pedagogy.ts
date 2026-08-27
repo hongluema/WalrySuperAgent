@@ -29,6 +29,15 @@ export function hasAskedQuestion(text: string, plannedQuestion: string): boolean
   return text.includes(stem || plannedQuestion);
 }
 
+export function questionAlreadyAsked(asked: string[], question: string | undefined): boolean {
+  if (!question) return false;
+  return asked.some((prev) => hasAskedQuestion(prev, question) || hasAskedQuestion(question, prev));
+}
+
+function isVacuousClaim(value: string): boolean {
+  return /^(无|没有|无发明|没有发明|暂无|none|n\/a|-|—|空)$/iu.test(value.trim());
+}
+
 function openingQuestion(node: TopicModel["conceptRoute"][number] | undefined): string | undefined {
   const question = node?.openingQuestion?.trim();
   if (!question) return undefined;
@@ -128,6 +137,37 @@ function selectQuestion(evaluation: TutorAnswerEvaluation, purpose: QuestionPurp
   return withThinkingHint(question, hint);
 }
 
+function freshProbe(node: TopicModel["conceptRoute"][number] | undefined): string | undefined {
+  if (!node) return undefined;
+  return withThinkingHint(
+    `换到另一个你熟悉的场景，围绕“${node.title}”，你会先检查哪个会改变判断的条件？`,
+    node.openingHint?.trim() || `从“${node.target}”里找一个上一问还没覆盖的条件`,
+  );
+}
+
+function unusedProbe(node: TopicModel["conceptRoute"][number] | undefined, asked: string[]): string | undefined {
+  for (const question of [teacherProbe(node), freshProbe(node)]) {
+    if (question && !questionAlreadyAsked(asked, question)) return question;
+  }
+  return undefined;
+}
+
+function pickQuestion(
+  evaluation: TutorAnswerEvaluation,
+  purpose: QuestionPurpose,
+  node: TopicModel["conceptRoute"][number] | undefined,
+  asked: string[],
+): string | undefined {
+  const preferred = selectQuestion(evaluation, purpose);
+  const others = evaluation.questionCandidates
+    .filter((item) => item.purpose !== purpose)
+    .map((item) => selectQuestion(evaluation, item.purpose));
+  for (const question of [preferred, ...others, teacherProbe(node), freshProbe(node)]) {
+    if (question && !questionAlreadyAsked(asked, question)) return question;
+  }
+  return undefined;
+}
+
 const doubtCheckQuestion = "关于这一节，你还有哪里不清楚吗？（思路：可以指出某个概念、例子或应用场景；如果都清楚，也可以直接说没有疑问。）";
 
 function evidenceSet(nodeState: NodeLearningState | undefined, current: LearningEvidence[]) {
@@ -146,9 +186,18 @@ type EvidenceDrivenDecisionInput = {
 };
 
 export function buildEvidenceDrivenDecision(input: EvidenceDrivenDecisionInput): TutorTurnDecision {
-  const { model, activeConcept, nodeState, evaluation } = input;
+  const { model, activeConcept, nodeState } = input;
+  const evaluation: TutorAnswerEvaluation = {
+    ...input.evaluation,
+    pedagogy: {
+      ...input.evaluation.pedagogy,
+      invented: isVacuousClaim(input.evaluation.pedagogy.invented) ? "" : input.evaluation.pedagogy.invented.trim(),
+    },
+    misconceptionUpdates: input.evaluation.misconceptionUpdates.filter((item) => !isVacuousClaim(item.description)),
+  };
   const current = nodeAt(model, activeConcept);
   const next = model.conceptRoute[activeConcept + 1];
+  const asked = nodeState?.questionsAsked ?? [];
   const acceptedEvidence = constrainEvaluationEvidence(evaluation.assessment.evidence, nodeState?.lastQuestionPurpose);
   const sufficient = evidenceSet(nodeState, acceptedEvidence);
   const required = requiredCriteria(model, activeConcept);
@@ -209,7 +258,7 @@ export function buildEvidenceDrivenDecision(input: EvidenceDrivenDecisionInput):
 
   if (nodeState?.stage === "doubt-check") {
     if (openMisconceptions.length > 0) {
-      const question = selectQuestion(evaluation, "discrimination") ?? teacherProbe(current);
+      const question = pickQuestion(evaluation, "discrimination", current, asked);
       return {
         ...base,
         nextAction: "repair-misconception",
@@ -299,7 +348,7 @@ export function buildEvidenceDrivenDecision(input: EvidenceDrivenDecisionInput):
   }
 
   if (directAnswer) {
-    const question = selectQuestion(evaluation, missing ?? "accurate") ?? teacherProbe(current);
+    const question = pickQuestion(evaluation, missing ?? "accurate", current, asked);
     return {
       ...base,
       nextAction: "explain",
@@ -353,7 +402,7 @@ export function buildEvidenceDrivenDecision(input: EvidenceDrivenDecisionInput):
     : evaluation.intent === "dont_know"
       ? (isEvidencePurpose(nodeState?.lastQuestionPurpose) ? nodeState!.lastQuestionPurpose! : missing ?? "accurate")
       : missing ?? "accurate";
-  const question = selectQuestion(evaluation, purpose) ?? teacherProbe(current);
+  const question = pickQuestion(evaluation, purpose, current, asked);
   const nextAction: TutorTurnDecision["nextAction"] = repairing
     ? "repair-misconception"
     : evaluation.intent === "dont_know"
@@ -463,13 +512,13 @@ export function buildFirstTeachingDecision(model: TopicModel, diagnosisSummary: 
   };
 }
 
-export function buildFallbackTurnDecision(message: string, model: TopicModel, activeConcept: number): TutorTurnDecision {
+export function buildFallbackTurnDecision(message: string, model: TopicModel, activeConcept: number, asked: string[] = []): TutorTurnDecision {
   const current = nodeAt(model, activeConcept);
   const next = nextTitle(model, activeConcept);
   const title = current?.title ?? "当前概念";
   const target = current?.target ?? model.coreOutcome;
   const quote = message.trim() || "（空回答）";
-  const question = teacherProbe(current);
+  const question = unusedProbe(current, asked);
   return {
     intent: "answer",
     understoodMeaning: "决策器不可用，但要带着原话继续教：肯定能用的半句，补当前节点缺的一层，问一个新问题",

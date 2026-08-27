@@ -3,7 +3,7 @@ import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecis
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
-import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, hasAskedQuestion, nodeProgress, withThinkingHint } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, hasAskedQuestion, nodeProgress, questionAlreadyAsked, withThinkingHint } from "./pedagogy.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 
@@ -109,10 +109,10 @@ export class TutorOrchestrator {
   }
 
   private async decide(message: string, state: TutorState, topicModel: TopicModel, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
+    const activeConcept = topicModel.conceptRoute[state.activeConcept] ?? topicModel.conceptRoute[0];
+    const nodeState = activeConcept ? state.nodeLearningStates[activeConcept.id] : undefined;
     try {
       await emitThinking(emit, "正在根据你的回答做教学判断…");
-      const activeConcept = topicModel.conceptRoute[state.activeConcept] ?? topicModel.conceptRoute[0];
-      const nodeState = activeConcept ? state.nodeLearningStates[activeConcept.id] : undefined;
       const evaluation = await this.modelClient!.evaluateAnswer({ message, state, topicModel }, signal);
       const decision = buildEvidenceDrivenDecision({
         model: topicModel,
@@ -127,7 +127,7 @@ export class TutorOrchestrator {
       const reason = error instanceof Error ? error.message : "模型决策失败";
       console.error("[Tutor] 教学决策降级", error);
       await emit({ type: "model.degraded", stage: "decision", reason });
-      const fallback = buildFallbackTurnDecision(message, topicModel, state.activeConcept);
+      const fallback = buildFallbackTurnDecision(message, topicModel, state.activeConcept, nodeState?.questionsAsked ?? []);
       fallback.thinking = `教学评估失败：${reason}。带着原话继续教，不要求复述，也不推进掌握状态。`;
       await emit({ type: "reasoning.delta", text: fallback.thinking });
       return fallback;
@@ -442,7 +442,9 @@ export class TutorOrchestrator {
       await emit({ type: "message.delta", text: fallback });
     }
     const plannedQuestion = decision.responsePlan.question || decision.pedagogy?.nextQuestion;
-    if (plannedQuestion && !hasAskedQuestion(text, plannedQuestion)) {
+    const current = model.conceptRoute[state.activeConcept] ?? model.conceptRoute[0];
+    const asked = current ? state.nodeLearningStates[current.id]?.questionsAsked ?? [] : [];
+    if (plannedQuestion && !hasAskedQuestion(text, plannedQuestion) && !questionAlreadyAsked(asked, plannedQuestion)) {
       const questionSuffix = `${text.trim() ? "\n\n" : ""}${plannedQuestion}`;
       text += questionSuffix;
       await emit({ type: "message.delta", text: questionSuffix });

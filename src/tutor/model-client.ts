@@ -277,6 +277,11 @@ function asString(value: unknown): string {
   return textValue(value) ?? "";
 }
 
+function vacuousToEmpty(value: string): string {
+  const trimmed = value.trim();
+  return /^(无|没有|无发明|没有发明|暂无|none|n\/a|-|—|空)$/iu.test(trimmed) ? "" : trimmed;
+}
+
 function asStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((item) => textValue(item) ?? "").filter(Boolean);
   if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).map((item) => textValue(item) ?? "").filter(Boolean);
@@ -337,11 +342,11 @@ export function normalizeEvaluation(value: unknown): unknown {
         confidence: typeof item?.confidence === "number" ? item.confidence : undefined,
       })),
     },
-    misconceptionUpdates: Array.isArray(updatesRaw) ? updatesRaw : [],
+    misconceptionUpdates: (Array.isArray(updatesRaw) ? updatesRaw : []).filter((item: any) => Boolean(vacuousToEmpty(textValue(item?.description) ?? asString(item?.description)))),
     pedagogy: {
       hit: asString(pedagogy.hit),
       unpunched: asString(pedagogy.unpunched),
-      invented: asString(pedagogy.invented),
+      invented: vacuousToEmpty(asString(pedagogy.invented)),
       sourceMove: asString(pedagogy.sourceMove),
     },
     questionCandidates: (Array.isArray(candidatesRaw) ? candidatesRaw : []).map((item: any) => ({

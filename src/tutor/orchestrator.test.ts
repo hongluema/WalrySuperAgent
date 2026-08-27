@@ -223,6 +223,29 @@ test("rewrites evaluation aliases into the closed schema before validation", () 
   assert.equal(normalized.questionCandidates[0].purpose, "explained");
 });
 
+test("treats vacuous invented claims as empty before evaluation validation", () => {
+  const normalized = normalizeEvaluation({
+    intent: "answer",
+    understoodMeaning: "学生给出了家庭材料方案",
+    observations: [{ quote: "给些豆子、大米", implication: "迁移到家庭" }],
+    assessment: {
+      status: "partial",
+      evidence: [{ learnerQuote: "给些豆子、大米", criterion: "transfer", strength: "sufficient" }],
+    },
+    pedagogy: {
+      hit: "豆子和大米",
+      unpunched: "",
+      invented: "无",
+      sourceMove: "补结构",
+    },
+    misconceptionUpdates: [{ description: "无", status: "open", evidenceQuote: "—" }],
+    questionCandidates: [],
+  }) as Record<string, any>;
+
+  assert.equal(normalized.pedagogy.invented, "");
+  assert.deepEqual(normalized.misconceptionUpdates, []);
+});
+
 test("normalizes loose diagnosis shapes before TutorDiagnosis validation", () => {
   const normalized = normalizeDiagnosis({
     summary: "有一定基础",
@@ -333,6 +356,41 @@ test("node progress score follows sufficient evidence on the current route node"
     misconceptions: [],
     questionsAsked: [],
   }), { score: 100, status: "mastered" });
+});
+
+test("vacuous invented does not recycle the opening question as a misconception repair", () => {
+  const model = fakeTopicModel();
+  const opening = withThinkingHint(model.conceptRoute[0].openingQuestion, model.conceptRoute[0].openingHint);
+  const evaluation = fakeEvaluation("给些豆子、大米让孩子在成人监护下玩耍");
+  evaluation.pedagogy.invented = "无";
+  evaluation.assessment.evidence = [
+    { learnerQuote: "给些豆子、大米", criterion: "transfer", strength: "sufficient", confidence: 0.9 },
+  ];
+  evaluation.questionCandidates = [
+    { purpose: "accurate", text: "最关键的区别是什么？", thinkingHint: "对比两个条件" },
+  ];
+  const decision = buildEvidenceDrivenDecision({
+    model,
+    activeConcept: 0,
+    nodeState: {
+      nodeId: "concept-1",
+      stage: "elicit",
+      evidence: [
+        { learnerQuote: "微小事物敏感期", criterion: "accurate", strength: "sufficient" },
+        { learnerQuote: "手眼协调", criterion: "explained", strength: "sufficient" },
+      ],
+      misconceptions: [],
+      questionsAsked: [opening],
+      lastQuestionPurpose: "transfer",
+    },
+    evaluation,
+  });
+
+  assert.notEqual(decision.nextAction, "repair-misconception");
+  assert.equal(decision.pedagogy?.invented, "");
+  assert.notEqual(decision.responsePlan.gapToRepair, "无");
+  assert.equal(decision.responsePlan.question?.includes(model.conceptRoute[0].openingQuestion), false);
+  assert.match(decision.responsePlan.question ?? "", /换到另一个你熟悉的场景/);
 });
 
 test("an opening hint that already includes 思路 is wrapped only once", () => {
