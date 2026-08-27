@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ModelMessage } from "ai";
 import { withAgentRules } from "../agent-md.js";
 import type { TopicModel, TutorAnswerEvaluation, TutorDiagnosis, TutorTurnDecision, TutorState } from "./types.js";
+import { isGenericRouteTitle } from "./topic-model.js";
 
 const capabilityPlanSchema = z.object({
   acquisition: z.array(z.string()),
@@ -74,7 +75,7 @@ const topicModelSchema = z.object({
     openingQuestion: z.string().min(4),
     openingHint: z.string().min(4),
   })).min(2).max(10),
-  boundaryCases: z.array(z.string()).min(1).max(8),
+  boundaryCases: z.array(z.string()).max(8).default([]),
   practiceTarget: z.string(),
   rubricAnchors: z.array(z.object({
     conceptId: z.string(),
@@ -93,6 +94,16 @@ const topicModelSchema = z.object({
     limitations: z.array(z.string()),
   }),
   capabilities: capabilityPlanSchema,
+}).superRefine((model, context) => {
+  model.conceptRoute.forEach((node, index) => {
+    if (isGenericRouteTitle(node.title)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["conceptRoute", index, "title"],
+        message: `路线节点不能用「${node.title}」这种万能标题凑数，必须是本学习对象的具体内容`,
+      });
+    }
+  });
 });
 
 const diagnosisSchema = z.object({
@@ -390,7 +401,7 @@ export function normalizeTopicModel(value: unknown): unknown {
   const backgroundBrief = textValue(source.backgroundBrief)
     ?? textValue(source.topicBackground)
     ?? textValue(source.background)
-    ?? `${lessonTitle}是本次需要系统理解的学习对象。它要解决的核心问题是：${coreOutcome}。为了形成完整认识，需要先知道它产生的背景和适用场景，再理解其中的关键概念、组成部分与作用关系，最后通过辨析和实际情境验证理解。课程会围绕${routeTitles || "基础定位、核心机制、边界辨析和实践应用"}逐层展开，而不是只记住一个定义或几条结论。学习时还要特别区分主题本身的核心原则、常见误解和超出本课程范围的延伸内容，这样才能知道它是什么、为什么有用、在什么条件下适用，以及遇到真实问题时应该如何判断。`;
+    ?? `${lessonTitle}是本次需要系统理解的学习对象。它要解决的核心问题是：${coreOutcome}。为了形成完整认识，需要先知道它产生的背景和适用场景，再理解其中的关键概念、组成部分与作用关系，最后通过辨析和实际情境验证理解。课程会围绕${routeTitles || "该主题不可省略的内容节点"}逐层展开，而不是只记住一个定义或几条结论。学习时还要特别区分主题本身的核心原则、常见误解和超出本课程范围的延伸内容，这样才能知道它是什么、为什么有用、在什么条件下适用，以及遇到真实问题时应该如何判断。`;
 
   return {
     id: textValue(source.id) ?? `topic-${Date.now().toString(36)}`,
@@ -505,6 +516,8 @@ export class AiTutorModelClient implements TutorModelClient {
         "每个路线节点都必须预先设计 openingQuestion 和 openingHint。openingQuestion 是老师讲完该节点第一个最小知识块后，用来摸学生当前理解的主题专属问题；应要求判断、比较、解释或联系真实场景，不能让学生复述摘要。openingHint 只给思考入口，不能泄露答案。",
         "核心概念必须在节点标题中明确出现，不能藏在‘基础知识’‘重要性’等泛化标题下。",
         `路线节点必须是学习对象本身的知识/内容节点。判断标准：去掉这个节点后，学习者对该领域的理解是否有实质缺失？\u201C明确学习目标\u201D\u201C批判性思考\u201D\u201C形成应用清单\u201D等属于教学技法，应融入内容节点的教学过程，不作为独立节点。`,
+        "节点数量由当前用户目标下不可省略的内容块决定，常见 2-7 个，不是固定 4 段。禁止用「基础定位、核心机制、边界辨析、实践应用」或同义四拍凑节点。用户目标较窄时，只覆盖该目标，不要扩成领域通识课。",
+        "boundaryCases 只放生手也能判断的常见误区；没有就返回空数组，不要编一条凑数。",
         "对于有明确源材料的学习（书/论文/代码库），路线应忠于源材料自身的结构。",
         "路线必须服务于用户目标，不能把不相关主题的模板套进来。",
         `必须严格返回以下字段结构，字段名不能改名：${JSON.stringify(topicModelContract)}`,

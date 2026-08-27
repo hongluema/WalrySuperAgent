@@ -4,21 +4,26 @@ function option(id: string, label: string) {
   return { id, label };
 }
 
+const GENERIC_ROUTE_TITLE = /^(基础知识|重要性|概述|引言|总结|回顾|学习目标|批判性思考|应用清单|基础定位|核心机制|边界辨析|实践应用|实际应用|基本概念|背景介绍|综合应用|明确学习目标|形成应用清单)$/u;
+
+export function isGenericRouteTitle(title: string): boolean {
+  return GENERIC_ROUTE_TITLE.test(title.trim());
+}
+
+export function isNoviceJudgeableBoundary(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 8 || trimmed.length > 80) return false;
+  return !/记住定义|已经学会|局部技巧等同|相近概念混为一谈/.test(trimmed);
+}
+
 export function buildDiagnosticProtocol(model: TopicModel): TopicModel["diagnosticDimensions"] {
   const title = model.lessonTitle?.trim() || "这个主题";
-  const focusOptions = model.conceptRoute
-    .map((node) => node.title?.trim())
-    .filter((label): label is string => Boolean(label))
-    .slice(0, 6)
-    .map((label, index) => option(String.fromCharCode(65 + index), label));
-  if (focusOptions.length === 0) {
-    focusOptions.push(option("A", "核心概念和原理"), option("B", "实际应用和操作"));
-  } else if (focusOptions.length === 1) {
-    focusOptions.push(option("B", "实际应用和操作"));
-  }
-  const boundary = model.boundaryCases.map((item) => item.trim()).find(Boolean) || "把记住定义当成已经学会";
+  const focusTitles = [...new Set(
+    model.conceptRoute.map((node) => node.title?.trim()).filter((label): label is string => Boolean(label)),
+  )].slice(0, 6);
+  const boundary = model.boundaryCases.map((item) => item.trim()).find(Boolean) ?? "";
 
-  return [
+  const cards: TopicModel["diagnosticDimensions"] = [
     {
       id: "baseline",
       kind: "baseline",
@@ -49,7 +54,10 @@ export function buildDiagnosticProtocol(model: TopicModel): TopicModel["diagnost
         option("D", "解决一个已经遇到的具体问题"),
       ],
     },
-    {
+  ];
+
+  if (focusTitles.length >= 2) {
+    cards.push({
       id: "focus",
       kind: "focus",
       tab: "内容侧重",
@@ -57,9 +65,12 @@ export function buildDiagnosticProtocol(model: TopicModel): TopicModel["diagnost
       teachingUse: "选中的节点多给例子和练习，其他节点确认直觉后尽快过。",
       question: `这次你最想先把「${title}」的哪一块搞清楚？`,
       thinkingHint: "选现在最想深入的那一块，而不是觉得最重要的全部",
-      options: focusOptions,
-    },
-    {
+      options: focusTitles.map((label, index) => option(String.fromCharCode(65 + index), label)),
+    });
+  }
+
+  if (isNoviceJudgeableBoundary(boundary)) {
+    cards.push({
       id: "misconception",
       kind: "misconception",
       tab: "边界判断",
@@ -73,14 +84,16 @@ export function buildDiagnosticProtocol(model: TopicModel): TopicModel["diagnost
         option("C", "部分对，要看具体条件和场景"),
         option("D", "还说不准，想先听老师怎么界定"),
       ],
-    },
-  ];
+    });
+  }
+
+  return cards;
 }
 
 function fallbackBackground(model: TopicModel): string {
   const route = model.conceptRoute.map((item) => item.title).filter(Boolean).join("、");
   const boundaries = model.boundaryCases.slice(0, 2).join("；");
-  return `${model.lessonTitle}是本次要系统理解的学习主题。${model.subject?.description || "它包含一组需要结合背景、概念关系和真实场景才能理解的知识。"}学习这个主题，不只是记住定义，而是要知道它试图解决什么问题、核心部分如何配合、常见场景中怎样使用，以及哪些相似说法其实超出了它的边界。本课程将围绕${route || "基本定位、核心机制、边界辨析和实际应用"}逐层展开，并通过解释、比较和新情境练习检查理解。需要特别留意的边界包括：${boundaries || "不要把局部技巧等同于完整主题，也不要把相近概念混为一谈"}。学完后，你应能用自己的话说明它是什么、为什么有用，并在具体情境中作出有依据的判断。`;
+  return `${model.lessonTitle}是本次要系统理解的学习主题。${model.subject?.description || "它包含一组需要结合背景、概念关系和真实场景才能理解的知识。"}学习这个主题，不只是记住定义，而是要知道它试图解决什么问题、核心部分如何配合、常见场景中怎样使用，以及哪些相似说法其实超出了它的边界。本课程将围绕${route || "该主题不可省略的内容节点"}逐层展开，并通过解释、比较和新情境练习检查理解。需要特别留意的边界包括：${boundaries || "不要把局部技巧等同于完整主题，也不要把相近概念混为一谈"}。学完后，你应能用自己的话说明它是什么、为什么有用，并在具体情境中作出有依据的判断。`;
 }
 
 export function ensureTopicModelDefaults(model: TopicModel): TopicModel {

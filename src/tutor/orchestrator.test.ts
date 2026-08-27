@@ -9,7 +9,7 @@ import type { TopicModel, TutorAnswerEvaluation, TutorEvent, TutorState, TutorTu
 import type { TutorModelClient } from "./model-client.js";
 import { loadAgentMd } from "../agent-md.js";
 import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
-import { ensureTopicModelDefaults } from "./topic-model.js";
+import { ensureTopicModelDefaults, isGenericRouteTitle } from "./topic-model.js";
 import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, stripChoiceOptionLines, withThinkingHint } from "./pedagogy.js";
 
 function protocolAnswers(overrides: Record<string, string> = {}) {
@@ -185,6 +185,46 @@ test("diagnostic protocol is determined by route and boundary, not by invented q
     a.diagnosticDimensions[0].options.map((item) => item.id),
     ["A", "B", "C", "D"],
   );
+});
+
+test("diagnostic protocol drops unused slots instead of padding to four", () => {
+  const noBoundary = fakeTopicModel();
+  noBoundary.boundaryCases = [];
+  assert.deepEqual(
+    ensureTopicModelDefaults(noBoundary).diagnosticDimensions.map((item) => item.kind),
+    ["baseline", "motivation", "focus"],
+  );
+
+  const oneNode = fakeTopicModel();
+  oneNode.conceptRoute = [oneNode.conceptRoute[0]];
+  oneNode.boundaryCases = [];
+  assert.deepEqual(
+    ensureTopicModelDefaults(oneNode).diagnosticDimensions.map((item) => item.kind),
+    ["baseline", "motivation"],
+  );
+
+  const threeNodes = fakeTopicModel();
+  threeNodes.conceptRoute = [
+    ...threeNodes.conceptRoute,
+    {
+      id: "concept-3",
+      title: "第三个概念",
+      target: "介绍第三个概念",
+      openingQuestion: "第三个概念会改变哪个判断？",
+      openingHint: "先找会改变结果的条件",
+    },
+  ];
+  assert.deepEqual(
+    ensureTopicModelDefaults(threeNodes).diagnosticDimensions.find((item) => item.kind === "focus")?.options.map((item) => item.label),
+    ["第一个概念", "第二个概念", "第三个概念"],
+  );
+});
+
+test("generic four-beat route titles are not valid content nodes", () => {
+  assert.equal(isGenericRouteTitle("核心机制"), true);
+  assert.equal(isGenericRouteTitle("基础定位"), true);
+  assert.equal(isGenericRouteTitle("实践应用"), true);
+  assert.equal(isGenericRouteTitle("吸收性心智"), false);
 });
 
 test("rewrites evaluation aliases into the closed schema before validation", () => {
