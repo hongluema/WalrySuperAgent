@@ -16,12 +16,26 @@ function nextTitle(model: TopicModel, index: number) {
   return model.conceptRoute[index + 1]?.title;
 }
 
+export function withThinkingHint(question: string, hint?: string): string {
+  const trimmed = question.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.includes("（思路：")) return trimmed;
+  const inner = (hint ?? "").trim().replace(/^（?思路：/, "").replace(/）$/, "").trim();
+  return inner ? `${trimmed}（思路：${inner}）` : trimmed;
+}
+
+export function hasAskedQuestion(text: string, plannedQuestion: string): boolean {
+  const stem = plannedQuestion.replace(/（思路：[\s\S]*$/u, "").trim();
+  return text.includes(stem || plannedQuestion);
+}
+
 function openingQuestion(node: TopicModel["conceptRoute"][number] | undefined): string | undefined {
   const question = node?.openingQuestion?.trim();
   if (!question) return undefined;
-  if (/（思路：[^）]+）/u.test(question)) return question;
-  const hint = node?.openingHint?.trim() || `联系一个你熟悉的场景，找出会影响判断的条件`;
-  return `${question}（思路：${hint}）`;
+  return withThinkingHint(
+    question,
+    node?.openingHint?.trim() || `联系一个你熟悉的场景，找出会影响判断的条件`,
+  );
 }
 
 function teacherProbe(node: TopicModel["conceptRoute"][number] | undefined): string | undefined {
@@ -94,8 +108,7 @@ function selectQuestion(evaluation: TutorAnswerEvaluation, purpose: QuestionPurp
   const question = candidate?.text.trim();
   const hint = candidate?.thinkingHint.trim();
   if (!question || !hint || bannedQuestionPattern.test(question)) return undefined;
-  if (/（思路：[^）]+）/u.test(question)) return question;
-  return `${question}（思路：${hint}）`;
+  return withThinkingHint(question, hint);
 }
 
 const doubtCheckQuestion = "关于这一节，你还有哪里不清楚吗？（思路：可以指出某个概念、例子或应用场景；如果都清楚，也可以直接说没有疑问。）";

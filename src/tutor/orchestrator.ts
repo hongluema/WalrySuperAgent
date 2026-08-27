@@ -3,7 +3,7 @@ import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecis
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
-import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, hasAskedQuestion, withThinkingHint } from "./pedagogy.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 
@@ -25,11 +25,6 @@ function cardsFor(model: TopicModel): DiagnosticCard[] {
     index,
     total: model.diagnosticDimensions.length,
   }));
-}
-
-function withThinkingHint(question: string, hint: string): string {
-  if (/（思路：[^）]+）/u.test(question)) return question;
-  return `${question.trim()}（思路：${hint.trim()}）`;
 }
 
 function answerLetter(input: string): string {
@@ -439,7 +434,7 @@ export class TutorOrchestrator {
       await emit({ type: "message.delta", text: fallback });
     }
     const plannedQuestion = decision.responsePlan.question || decision.pedagogy?.nextQuestion;
-    if (plannedQuestion && !text.includes(plannedQuestion)) {
+    if (plannedQuestion && !hasAskedQuestion(text, plannedQuestion)) {
       const questionSuffix = `${text.trim() ? "\n\n" : ""}${plannedQuestion}`;
       text += questionSuffix;
       await emit({ type: "message.delta", text: questionSuffix });

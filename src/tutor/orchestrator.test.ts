@@ -10,7 +10,7 @@ import type { TutorModelClient } from "./model-client.js";
 import { loadAgentMd } from "../agent-md.js";
 import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
 import { ensureTopicModelDefaults } from "./topic-model.js";
-import { buildEvidenceDrivenDecision, constrainEvaluationEvidence } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, hasAskedQuestion, withThinkingHint } from "./pedagogy.js";
 
 function fakeTopicModel(): TopicModel {
   return {
@@ -294,6 +294,22 @@ test("teaching questions carry a non-answer thinking direction", () => {
 
   assert.match(decision.responsePlan.question ?? "", /？（思路：[^）]+）$/u);
   assert.doesNotMatch(decision.responsePlan.question ?? "", /标准答案|答案是/u);
+});
+
+test("an opening hint that already includes 思路 is wrapped only once", () => {
+  const model = fakeTopicModel();
+  model.conceptRoute[0].openingQuestion = "一个两岁半的孩子反复把积木排成一条线，成人应当如何解读与应对？";
+  model.conceptRoute[0].openingHint = "（思路：从特定年龄段的发展敏感期特征，以及儿童如何通过外部环境建立内在安全感与心智模型来思考。）";
+  const question = buildFirstTeachingDecision(model, "诊断摘要").responsePlan.question ?? "";
+  const wrapped = withThinkingHint(model.conceptRoute[0].openingQuestion, model.conceptRoute[0].openingHint);
+
+  assert.equal((question.match(/思路：/g) ?? []).length, 1);
+  assert.doesNotMatch(question, /（思路：（思路：/);
+  assert.match(question, /？（思路：从特定年龄段的发展敏感期特征/);
+  assert.equal(
+    hasAskedQuestion(`讲解结束。\n\n${model.conceptRoute[0].openingQuestion}（思路：从特定年龄段的发展敏感期特征，以及儿童如何通过外部环境建立内在安全感与心智模型来思考。）`, wrapped),
+    true,
+  );
 });
 
 test("an open misconception blocks mastery even after doubt confirmation", () => {
