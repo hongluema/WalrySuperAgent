@@ -22,7 +22,7 @@ idle → research → diagnose → plan → teach → (complete)
 
 ### 1. idle → research：入口判断
 
-**触发条件**：用户首条消息且 `isSystematicLearningIntent(message)` 匹配成功（正则匹配"学习/掌握/练习"等关键词）。
+**触发条件**：用户首条消息且 `isSystematicLearningIntent(message)` 匹配成功（正则匹配"学习/掌握/练习"等关键词，或消息里带有微信公众号文章链接）。
 
 **执行**：`agent-service.ts:150` 路由到 `TutorOrchestrator.run()`。
 

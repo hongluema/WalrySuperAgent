@@ -6,6 +6,7 @@ import type { TutorModelClient } from "./model-client.js";
 import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, questionAlreadyAsked, withThinkingHint } from "./pedagogy.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
+import { extractWeixinUrls, fetchWeixinArticle, stripWeixinUrls, type SourceArticle } from "../tools/weixin-article.js";
 
 const phaseLabels = {
   research: "正在建立学习对象与能力模型",
@@ -106,6 +107,7 @@ export class TutorOrchestrator {
       const text = typeof result === "string" ? result : JSON.stringify(result);
       return truncateResult(text, tool.maxResultChars);
     },
+    private readonly fetchSource: (url: string) => Promise<SourceArticle> = fetchWeixinArticle,
   ) {}
 
   async hasActiveSession(conversationId: string): Promise<boolean> {
@@ -171,32 +173,48 @@ export class TutorOrchestrator {
 
       if (isNewTopic) {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });
-        await emitThinking(emit, "正在检索主题相关资料…");
         let researchMaterial: string | undefined;
-        const researchQuery = `${message} 背景 核心内容 结构`;
-        try {
-          const result = await this.search(researchQuery);
-          const text = typeof result === "string" ? result.trim() : JSON.stringify(result);
-          if (text && !text.startsWith("[web_search]") && text !== "没有找到相关结果") {
-            researchMaterial = text;
-          } else {
-            await emit({ type: "grounding.degraded", reason: text || "搜索没有返回可用内容" });
+        let userGoal = message;
+        let sourceUrl = "";
+        const weixinUrls = extractWeixinUrls(message);
+        if (weixinUrls[0]) {
+          await emitThinking(emit, "正在抓取微信公众号文章…");
+          try {
+            const article = await this.fetchSource(weixinUrls[0]);
+            sourceUrl = article.url;
+            userGoal = stripWeixinUrls(message) || `请以这篇微信公众号文章为材料学习：${article.title}`;
+            researchMaterial = `来源：${article.url}\n标题：${article.title}\n\n${article.markdown}`;
+          } catch (error) {
+            await emit({ type: "grounding.degraded", reason: error instanceof Error ? error.message : "公众号文章抓取失败" });
           }
-        } catch (error) {
-          await emit({ type: "grounding.degraded", reason: error instanceof Error ? error.message : "搜索失败" });
+        }
+        const researchQuery = `${userGoal} 背景 核心内容 结构`;
+        if (!researchMaterial) {
+          await emitThinking(emit, "正在检索主题相关资料…");
+          try {
+            const result = await this.search(researchQuery);
+            const text = typeof result === "string" ? result.trim() : JSON.stringify(result);
+            if (text && !text.startsWith("[web_search]") && text !== "没有找到相关结果") {
+              researchMaterial = text;
+            } else {
+              await emit({ type: "grounding.degraded", reason: text || "搜索没有返回可用内容" });
+            }
+          } catch (error) {
+            await emit({ type: "grounding.degraded", reason: error instanceof Error ? error.message : "搜索失败" });
+          }
         }
         await emitThinking(emit, researchMaterial
           ? "已找到参考资料，正在生成主题模型和诊断题…"
           : "未取到检索结果，正在用已有知识生成主题模型和诊断题…");
         topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({
-          userGoal: message,
+          userGoal,
           history: state.messages,
           materials: researchMaterial ? [researchMaterial] : [],
         }, signal));
         if (researchMaterial) {
-          const urls = [...new Set(researchMaterial.match(/https?:\/\/\S+/g) ?? [])];
+          const urls = sourceUrl ? [sourceUrl] : [...new Set(researchMaterial.match(/https?:\/\/\S+/g) ?? [])];
           topicModel.grounding = {
-            mode: "web-search",
+            mode: sourceUrl ? "source-material" : "web-search",
             sources: (urls.length ? urls : [researchQuery]).map((label) => ({ label, verified: true })),
             limitations: [],
           };

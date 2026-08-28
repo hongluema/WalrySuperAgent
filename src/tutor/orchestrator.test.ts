@@ -125,6 +125,8 @@ test("routes systematic learning requests for any topic into the same tutor", ()
   assert.equal(tutor.isTutorIntent("我想学习写作"), true);
   assert.equal(tutor.isTutorIntent("今天天气怎么样"), false);
   assert.equal(tutor.isTutorIntent("我想学习 Vibe Coding"), true);
+  assert.equal(tutor.isTutorIntent("https://mp.weixin.qq.com/s/abcd1234"), true);
+  assert.equal(tutor.isTutorIntent("给我讲下这篇文章\n\n微信公众号文章：https://mp.weixin.qq.com/s/abcd1234"), true);
 });
 
 test("agent.md is loaded as simplified-Chinese operating rules", () => {
@@ -714,6 +716,45 @@ test("uses real search material before building a grounded topic model", async (
     const state = JSON.parse(await readFile(join(root, "sessions", "grounded-session.json"), "utf8")) as TutorState;
     assert.equal(state.topicModel?.grounding.mode, "web-search");
     assert.deepEqual(state.topicModel?.grounding.sources, [{ label: "https://example.com/source", verified: true }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("uses a weixin article as source material and does not search", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-weixin-test-"));
+  try {
+    const client = fakeModelClient();
+    let receivedGoal = "";
+    let receivedMaterials: string[] = [];
+    client.buildTopicModel = async ({ userGoal, materials }) => {
+      receivedGoal = userGoal;
+      receivedMaterials = materials ?? [];
+      return fakeTopicModel();
+    };
+    const searchQueries: string[] = [];
+    const tutor = new TutorOrchestrator(
+      new TutorStore(root),
+      client,
+      async (query) => {
+        searchQueries.push(query);
+        return "搜索不该被调用";
+      },
+      async (url) => ({ title: "定投的底层逻辑", url, markdown: "定投不是择时。贵不贵要看估值分位数。" }),
+    );
+    const events: TutorEvent[] = [];
+    await tutor.run("weixin-session", "https://mp.weixin.qq.com/s/abcd1234", (event) => { events.push(event); });
+
+    assert.deepEqual(searchQueries, []);
+    assert.match(receivedGoal, /定投的底层逻辑/);
+    assert.match(receivedMaterials[0] ?? "", /估值分位数/);
+    assert.ok(events.some((event) => event.type === "research.completed"));
+    const thinking = events.filter((event) => event.type === "reasoning.delta").map((event) => event.text).join("");
+    assert.match(thinking, /微信公众号文章/);
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "weixin-session.json"), "utf8")) as TutorState;
+    assert.equal(state.topicModel?.grounding.mode, "source-material");
+    assert.deepEqual(state.topicModel?.grounding.sources, [{ label: "https://mp.weixin.qq.com/s/abcd1234", verified: true }]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
