@@ -36,6 +36,15 @@ function makeRoadmap(model: TopicModel) {
   return model.conceptRoute.map((node, index) => ({ ...node, status: index === 0 ? "active" as const : "locked" as const }));
 }
 
+function snapshotRoadmap(roadmap: TutorState["roadmap"]) {
+  return roadmap.map((node) => ({ ...node }));
+}
+
+async function emitRoadmap(state: TutorState, emit: (event: TutorEvent) => Promise<void> | void) {
+  if (state.roadmap.length === 0) return;
+  await emit({ type: "roadmap.ready", roadmap: snapshotRoadmap(state.roadmap) });
+}
+
 function answeredDiagnostics(state: TutorState) {
   return state.diagnosticCards.flatMap((card) => {
     const optionId = state.diagnosticAnswers[card.id];
@@ -219,6 +228,7 @@ export class TutorOrchestrator {
           const decision = await this.decide(message, state, topicModel, emit, signal);
           state.lastDecision = decision;
           this.applyStatePatch(state, topicModel, decision);
+          await emitRoadmap(state, emit);
           await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
           const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
           this.recordQuestion(state, topicModel, decision, responseText);
@@ -284,7 +294,7 @@ export class TutorOrchestrator {
           teachingApproach: diagnosis.teachingApproach,
         });
         await emit({ type: "topic.background.ready", summary: topicModel.backgroundBrief });
-        await emit({ type: "roadmap.ready", roadmap: state.roadmap });
+        await emitRoadmap(state, emit);
         state.phase = "teach";
         await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
         const teachingTrace = makeTrace(state, decision, decision.thinking ?? "");
@@ -313,6 +323,7 @@ export class TutorOrchestrator {
         scoredNode ? state.nodeLearningStates[scoredNode.id] : undefined,
       );
       await emit({ type: "assessment.updated", score: progress.score, status: progress.status });
+      await emitRoadmap(state, emit);
       const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
       this.recordQuestion(state, topicModel, decision, responseText);
       await this.persist(state, runId, emit);

@@ -887,6 +887,7 @@ test("does not mark a node mastered without sufficient evidence in all core crit
     assert.equal(lastScore()?.score, 100);
     assert.equal(lastScore()?.status, "in-progress");
 
+    events.length = 0;
     await tutor.run("mastery-session", "没有疑问了", emit);
     state = JSON.parse(await readFile(join(root, "sessions", "mastery-session.json"), "utf8")) as TutorState;
     assert.equal(state.roadmap[0].status, "mastered");
@@ -894,6 +895,12 @@ test("does not mark a node mastered without sufficient evidence in all core crit
     assert.equal(state.activeConcept, 1);
     assert.equal(lastScore()?.score, 100);
     assert.equal(lastScore()?.status, "mastered");
+    const latestRoadmap = [...events].reverse().find((item) => item.type === "roadmap.ready");
+    assert.equal(latestRoadmap?.type, "roadmap.ready");
+    if (latestRoadmap?.type === "roadmap.ready") {
+      assert.equal(latestRoadmap.roadmap[0].status, "mastered");
+      assert.equal(latestRoadmap.roadmap[1].status, "active");
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
