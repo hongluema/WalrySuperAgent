@@ -8,7 +8,7 @@ import { TutorStore } from "./store.js";
 import type { TopicModel, TutorAnswerEvaluation, TutorEvent, TutorState, TutorTurnDecision } from "./types.js";
 import type { TutorModelClient } from "./model-client.js";
 import { loadAgentMd } from "../agent-md.js";
-import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel } from "./model-client.js";
+import { normalizeDiagnosis, normalizeEvaluation, normalizeTopicModel, normalizeDesignedDiagnostics } from "./model-client.js";
 import { ensureTopicModelDefaults, isGenericRouteTitle } from "./topic-model.js";
 import { buildEvidenceDrivenDecision, buildFirstTeachingDecision, constrainEvaluationEvidence, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, stripChoiceOptionLines, withThinkingHint } from "./pedagogy.js";
 
@@ -23,11 +23,7 @@ function fakeTopicModel(): TopicModel {
     lessonTitle: "任意主题的学习",
     coreOutcome: "能够理解核心概念并在新场景中独立应用。",
     backgroundBrief: "这是一个用于验证通用私教流程的开放学习主题。学习者需要先知道它所处理的问题、基本概念之间的关系和常见使用场景，再通过解释、辨析与迁移建立真实理解。课程不会停留在定义记忆，而会沿着第一个概念和第二个概念逐层推进，同时区分看似理解与能够应用的差别。学完后，学习者应该能说明主题的基本定位、解释关键原因，并在一个未见过的新场景中作出有依据的判断。",
-    diagnosticDimensions: [
-      { id: "experience", kind: "baseline", tab: "已有经验", rationale: "确认真实起点", teachingUse: "决定是否从零讲起", question: "你做过什么？", thinkingHint: "回忆你是否接触或实践过类似内容", options: [{ id: "A", label: "做过" }, { id: "B", label: "没做过" }] },
-      { id: "understanding", kind: "motivation", tab: "学习动机", rationale: "确认学习用途", teachingUse: "选择更贴近目标的案例", question: "你为什么想学？", thinkingHint: "想一想学完后准备解决什么问题", options: [{ id: "A", label: "解决工作问题" }, { id: "B", label: "建立整体认识" }] },
-      { id: "transfer", kind: "focus", tab: "内容侧重", rationale: "确认最关心的部分", teachingUse: "调整路线中的讲解比重", question: "你更想先学哪部分？", thinkingHint: "从概念理解和实际应用中选择更迫切的一项", options: [{ id: "A", label: "实际应用" }, { id: "B", label: "概念原理" }] },
-    ],
+    diagnosticDimensions: [],
     conceptRoute: [
       {
         id: "concept-1",
@@ -218,6 +214,86 @@ test("diagnostic protocol drops unused slots instead of padding to four", () => 
     ensureTopicModelDefaults(threeNodes).diagnosticDimensions.find((item) => item.kind === "focus")?.options.map((item) => item.label),
     ["第一个概念", "第二个概念", "第三个概念"],
   );
+});
+
+test("teacher-designed diagnostics are kept instead of the enrollment form", () => {
+  const model = fakeTopicModel();
+  model.diagnosticDimensions = [
+    {
+      id: "flutter-base",
+      kind: "baseline",
+      tab: "Dart/Flutter 基础",
+      rationale: "起点决定从零讲还是过考点",
+      teachingUse: "零基础从语法讲起，写过 demo 就加快",
+      question: "你之前接触过 Dart 语言或 Flutter 吗？",
+      thinkingHint: "按你现在真实写过的程度选",
+      options: [
+        { id: "opt-1", label: "完全没碰过，纯零基础" },
+        { id: "opt-2", label: "看过一些教程，但没实际写过" },
+        { id: "opt-3", label: "写过一些小 demo 或简单页面" },
+        { id: "opt-4", label: "比较熟悉，想系统过一遍考点" },
+      ],
+    },
+    {
+      id: "gap",
+      kind: "focus",
+      tab: "最想补的层面",
+      rationale: "缺口决定哪一关加重",
+      teachingUse: "选中的层面多给对比和练习",
+      question: "作为 React 前端，你觉得自己最需要补的是哪一块？",
+      thinkingHint: "选现在最卡住面试准备的那一层",
+      options: [
+        { id: "a", label: "Dart 语言本身（语法、异步、类型）" },
+        { id: "b", label: "Widget 与布局系统（和 JSX/CSS 的差异）" },
+      ],
+    },
+    {
+      id: "deadline",
+      kind: "constraints",
+      tab: "面试时间线",
+      rationale: "期限决定深度和练习量",
+      teachingUse: "几周内就压缩到高频考点",
+      question: "你大概什么时候要去面试？",
+      thinkingHint: "按真实时间选，不必报得更从容",
+      options: [
+        { id: "A", label: "很急，几周内就要面" },
+        { id: "B", label: "一两个月内" },
+        { id: "C", label: "不着急，先系统学起来" },
+      ],
+    },
+  ];
+  const upgraded = ensureTopicModelDefaults(model);
+  assert.deepEqual(upgraded.diagnosticDimensions.map((item) => item.tab), ["Dart/Flutter 基础", "最想补的层面", "面试时间线"]);
+  assert.doesNotMatch(upgraded.diagnosticDimensions.map((item) => item.tab).join("、"), /了解程度|学习动机|内容侧重/);
+  assert.deepEqual(upgraded.diagnosticDimensions[0].options.map((item) => item.id), ["A", "B", "C", "D"]);
+  assert.equal(upgraded.diagnosticDimensions[0].options[0].label, "完全没碰过，纯零基础");
+});
+
+test("normalizes teacher-designed diagnostic aliases before validation", () => {
+  const normalized = normalizeDesignedDiagnostics({
+    questions: [{
+      title: "缩量下跌",
+      type: "misconception",
+      prompt: "缩量下跌作为筑底信号，你的理解是？",
+      hint: "按你现在的真实理解选",
+      choices: [
+        { text: "成交量持续萎缩，说明抛压枯竭、卖盘减少" },
+        { text: "价格下跌但成交清淡，说明市场没人关注" },
+        { text: "缩量说明主力在悄悄吸筹" },
+        { text: "不太清楚" },
+      ],
+    }, {
+      name: "熟悉程度",
+      aspect: "baseline",
+      question: "关于筑底迹象，你目前的熟悉程度是？",
+      answers: [{ label: "有实战看盘经验" }, { label: "不太清楚" }],
+    }],
+  }) as { diagnosticDimensions: Array<{ tab: string; kind: string; options: Array<{ id: string }> }> };
+
+  assert.equal(normalized.diagnosticDimensions[0].tab, "缩量下跌");
+  assert.equal(normalized.diagnosticDimensions[0].kind, "misconception");
+  assert.deepEqual(normalized.diagnosticDimensions[0].options.map((item) => item.id), ["A", "B", "C", "D"]);
+  assert.equal(normalized.diagnosticDimensions[1].kind, "baseline");
 });
 
 test("generic four-beat route titles are not valid content nodes", () => {

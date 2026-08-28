@@ -52,22 +52,26 @@ const answerEvaluationSchema = z.object({
 });
 
 const diagnosticOptionSchema = z.object({ id: z.string(), label: z.string() });
+const diagnosticDimensionSchema = z.object({
+  id: z.string(),
+  kind: diagnosticKindSchema,
+  tab: z.string(),
+  rationale: z.string(),
+  teachingUse: z.string(),
+  question: z.string(),
+  thinkingHint: z.string().min(4),
+  options: z.array(diagnosticOptionSchema).min(2).max(6),
+});
+const designedDiagnosticsSchema = z.object({
+  diagnosticDimensions: z.array(diagnosticDimensionSchema).min(2).max(5),
+});
 const topicModelSchema = z.object({
   id: z.string(),
   topic: z.string(),
   lessonTitle: z.string(),
   coreOutcome: z.string(),
   backgroundBrief: z.string().min(120).max(1600),
-  diagnosticDimensions: z.array(z.object({
-    id: z.string(),
-    kind: diagnosticKindSchema,
-    tab: z.string(),
-    rationale: z.string(),
-    teachingUse: z.string(),
-    question: z.string(),
-    thinkingHint: z.string().min(4),
-    options: z.array(diagnosticOptionSchema).min(2).max(6),
-  })).max(6).default([]),
+  diagnosticDimensions: z.array(diagnosticDimensionSchema).max(6).default([]),
   conceptRoute: z.array(z.object({
     id: z.string(),
     title: z.string(),
@@ -202,10 +206,55 @@ const diagnosisContract = {
   ],
 };
 
+const designedDiagnosticsContract = {
+  requiredFields: ["diagnosticDimensions"],
+  diagnosticDimensionFields: ["id", "kind: baseline|motivation|focus|misconception|constraints", "tab", "rationale", "teachingUse", "question", "thinkingHint", "options: { id: A|B|C..., label }[]"],
+  notes: [
+    "出 2-5 道题，题量由原话里还不知道、但会改教法的信息决定，不是固定 4 道",
+    "原话已经明确的信息不要再问",
+    "tab、question、options 必须用本课主题语言，禁止套「了解程度/学习动机/内容侧重」入学表",
+  ],
+};
+
 function textValue(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return undefined;
+}
+
+function letterOptionId(index: number): string {
+  return String.fromCharCode(65 + index);
+}
+
+function diagnosticKind(value: unknown, index: number): "baseline" | "motivation" | "focus" | "misconception" | "constraints" {
+  const normalized = textValue(value)?.toLowerCase();
+  if (normalized === "baseline" || normalized === "motivation" || normalized === "focus" || normalized === "misconception" || normalized === "constraints") {
+    return normalized;
+  }
+  return (["baseline", "motivation", "focus", "misconception", "constraints"] as const)[Math.min(index, 4)];
+}
+
+export function normalizeDesignedDiagnostics(value: unknown): unknown {
+  const source = value && typeof value === "object" ? value as Record<string, any> : {};
+  const dimensions = source.diagnosticDimensions ?? source.diagnostics ?? source.questions ?? source.cards ?? [];
+  return {
+    diagnosticDimensions: (Array.isArray(dimensions) ? dimensions : []).map((item: any, index: number) => {
+      const options = item?.options ?? item?.choices ?? item?.answers ?? [];
+      return {
+        id: textValue(item?.id) ?? textValue(item?.key) ?? `diag-${index + 1}`,
+        kind: diagnosticKind(item?.kind ?? item?.type ?? item?.aspect, index),
+        tab: textValue(item?.tab) ?? textValue(item?.name) ?? textValue(item?.title) ?? `摸底 ${index + 1}`,
+        rationale: textValue(item?.rationale) ?? textValue(item?.reason) ?? "这个信息会影响讲解起点、重点或练习方式",
+        teachingUse: textValue(item?.teachingUse) ?? textValue(item?.use) ?? textValue(item?.impact) ?? "根据答案调整后续教学的深浅和侧重",
+        question: textValue(item?.question) ?? textValue(item?.prompt) ?? textValue(item?.description) ?? "",
+        thinkingHint: textValue(item?.thinkingHint) ?? textValue(item?.hint) ?? "按你目前最真实的情况选择，不需要猜标准答案",
+        options: Array.isArray(options) ? options.map((option: any, optionIndex: number) => ({
+          id: letterOptionId(optionIndex),
+          label: textValue(option?.label) ?? textValue(option?.text) ?? textValue(option?.description) ?? String(option ?? ""),
+        })) : [],
+      };
+    }),
+  };
 }
 
 function normalizeQuoteImplication(item: unknown): { quote: string; implication: string } | undefined {
@@ -497,7 +546,7 @@ export class AiTutorModelClient implements TutorModelClient {
   constructor(private readonly model: any) {}
 
   async buildTopicModel(input: { userGoal: string; history: ModelMessage[]; materials?: string[] }, signal?: AbortSignal): Promise<TopicModel> {
-    return generateJson({
+    const model = await generateJson({
       model: this.model,
       schema: topicModelSchema,
       signal,
@@ -510,7 +559,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "忠于用户原始学习对象和目标，不得擅自扩张成更大的领域课程、考试课或项目课。",
         "只有真实提供或检索到的来源 verified 才能为 true；模型已有知识不是已验证研究。",
         "materials 非空时，它们是真实取得的搜索结果或用户材料。课程背景、核心内容、路线和例子必须优先以 materials 为依据，不得只凭模型记忆另起一套内容。",
-        "不要设计摸底题，也不要返回 diagnosticDimensions。摸底问卷由系统按固定协议根据路线节点和边界案例生成。",
+        "不要设计摸底题，也不要返回 diagnosticDimensions。先把课锁住，摸底由下一步针对这张课出探针。",
         "backgroundBrief 必须是一段可独立阅读的主题摘要，建议 300-600 个中文字符。读者只读这一段，也应大致知道：主题是什么、为何产生或要解决什么问题、核心组成/机制、典型用途、适用边界，以及接下来会学什么。不能只写两三句定义。",
         "每个路线节点的 target 必须写出进入教学时要介绍的具体背景、核心内容或例子，不能只写‘理解某概念’之类的抽象目标。",
         "每个路线节点都必须预先设计 openingQuestion 和 openingHint。openingQuestion 是老师讲完该节点第一个最小知识块后，用来摸学生当前理解的主题专属问题；应要求判断、比较、解释或联系真实场景，不能让学生复述摘要。openingHint 只给思考入口，不能泄露答案。",
@@ -525,6 +574,46 @@ export class AiTutorModelClient implements TutorModelClient {
       ].join("\n"),
       prompt: JSON.stringify({ userGoal: input.userGoal, history: input.history, materials: input.materials ?? [] }),
     });
+
+    try {
+      const designed = await generateJson({
+        model: this.model,
+        schema: designedDiagnosticsSchema,
+        signal,
+        contract: designedDiagnosticsContract,
+        normalize: normalizeDesignedDiagnostics,
+        system: [
+          "你是一对一私教。课已经锁定。先读懂学生原话里已经说清的信息，再决定还要问哪几件会改变后续教法的事。",
+          "自己出 2-5 道单选摸底题。题量由「原话里还不知道、但开讲前必须知道」的信息决定，不是固定 3 或 4 道。",
+          "学生原话已经明确的内容不要再问。例如已经说「为了面试」，就不要问家庭还是工作；没提期限，就不要发明面试时间线。",
+          "可以问的方面包括了解程度、核心对错观、学习缺口、使用场景、时间或工具约束，但这些只是备忘，不是必考卷。只出这一课真正需要的题。",
+          "题干、Tab 名、选项必须用本课节点和主题语言。禁止套用「了解程度 / 学习动机 / 内容侧重」这种入学表，也禁止把长课程标题整句塞进题干。",
+          "若原话或历史里出现先验（如做过 React），题干可以点明这层迁移。没有就不要编造身份。",
+          "机制类主题优先出节点判断题（正确机制 / 常见误读 / 不清楚）。技能迎考类优先出起点、缺口和原话暗示的约束。",
+          "每题必须写 rationale（老师为什么要知道）和 teachingUse（不同答案怎样改讲解、例子或节奏）。",
+          "每题只能单选，options.id 按顺序为 A、B、C、D。thinkingHint 只给思考方向，不泄露该选哪一项。",
+          "kind 只能是 baseline、motivation、focus、misconception、constraints 之一，按题目实际作用选择。",
+          `必须严格返回：${JSON.stringify(designedDiagnosticsContract)}`,
+        ].join("\n"),
+        prompt: JSON.stringify({
+          userGoal: input.userGoal,
+          history: input.history,
+          lessonTitle: model.lessonTitle,
+          coreOutcome: model.coreOutcome,
+          route: model.conceptRoute.map((node) => ({ id: node.id, title: node.title, target: node.target })),
+          boundaryCases: model.boundaryCases,
+          practiceTarget: model.practiceTarget,
+          backgroundBrief: model.backgroundBrief,
+          materials: input.materials ?? [],
+        }),
+      });
+      if (designed.diagnosticDimensions.length >= 2) {
+        model.diagnosticDimensions = designed.diagnosticDimensions;
+      }
+    } catch (error) {
+      console.error("[Tutor] 摸底出题失败，回退到协议问卷", error);
+    }
+    return model;
   }
 
   async compileDiagnosis(input: { state: TutorState; topicModel: TopicModel; answeredDiagnostics: Array<{ id: string; question: string; optionId: string; optionLabel: string }> }, signal?: AbortSignal): Promise<TutorDiagnosis> {
@@ -540,7 +629,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "诊断只描述学习起点，不要讲课程内容，也不要生成教学计划。",
         "学习对象是开放的；忠于用户目标，不根据类型擅自扩大课程范围。",
         "当前诊断是选择题，只用于判断讲解深浅和加快已有直觉的节点，不能证明完整掌握。",
-        "必须分别归纳学习者的真实起点、学习动机/使用场景、内容侧重以及现实约束；不能只按答对几题总结成‘初级/中级’。",
+        "根据本次实际出过的摸底题归纳学习者画像，不要把没问过的入学表项目编进去。不能只按答对几题总结成‘初级/中级’。",
         "teachingApproach 是可执行的因材施教方案：startingPoint 决定从哪里开讲；emphasis 决定哪些内容加重；exampleContext 决定用什么场景举例；pacing 决定哪些快讲或慢练；rationale 必须逐条引用诊断答案说明为什么这样教。",
         "skipSuggestions 标注学习者可能已有直觉的节点，供后续教学加快、不问已会的定义；编排器不会因此跳过节点。",
         "evidence 必须是 { quote, implication } 对象数组，禁止输出字符串数组。",

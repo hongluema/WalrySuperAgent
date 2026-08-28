@@ -90,6 +90,23 @@ export function buildDiagnosticProtocol(model: TopicModel): TopicModel["diagnost
   return cards;
 }
 
+function finalizeDiagnostics(model: TopicModel): TopicModel["diagnosticDimensions"] {
+  const usable = (model.diagnosticDimensions ?? []).filter((item) => item.question?.trim() && (item.options?.length ?? 0) >= 2);
+  const cards = usable.length >= 2 ? usable : buildDiagnosticProtocol(model);
+  return cards.map((dimension, index) => ({
+    ...dimension,
+    id: dimension.id?.trim() || `diag-${index + 1}`,
+    tab: dimension.tab?.trim() || `摸底 ${index + 1}`,
+    rationale: dimension.rationale?.trim() || "这个信息会影响讲解起点、重点或练习方式",
+    teachingUse: dimension.teachingUse?.trim() || "根据答案调整后续教学的深浅和侧重",
+    thinkingHint: dimension.thinkingHint?.trim() || "按你目前最真实的情况选择，不需要猜标准答案",
+    options: dimension.options.map((option, optionIndex) => ({
+      id: String.fromCharCode(65 + optionIndex),
+      label: option.label,
+    })),
+  }));
+}
+
 function fallbackBackground(model: TopicModel): string {
   const route = model.conceptRoute.map((item) => item.title).filter(Boolean).join("、");
   const boundaries = model.boundaryCases.slice(0, 2).join("；");
@@ -122,7 +139,7 @@ export function ensureTopicModelDefaults(model: TopicModel): TopicModel {
     openingHint: node.openingHint?.trim()
       || `先从“${node.target}”中找一个会影响判断的条件，再联系你熟悉的场景`,
   }));
-  model.diagnosticDimensions = buildDiagnosticProtocol(model);
+  model.diagnosticDimensions = finalizeDiagnostics(model);
   model.rubricAnchors = model.rubricAnchors.map((rubric) => ({
     ...rubric,
     explanation: rubric.explanation ?? "能说明关键结论为什么成立",
