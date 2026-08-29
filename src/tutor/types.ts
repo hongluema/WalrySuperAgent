@@ -276,6 +276,7 @@ export type TutorState = {
   teachingApproach?: TutorDiagnosis["teachingApproach"];
   knownIntuitions: Array<{ conceptId: string; reason: string; confidence: "high" | "medium" }>;
   nodeLearningStates: Record<string, NodeLearningState>;
+  sessionMode?: "teach" | "explain";
   updatedAt: string;
   lastDecision?: TutorTurnDecision;
 };

@@ -9,6 +9,7 @@ const runSchema = z.object({
   conversationId: z.string().trim().min(1).max(120),
   message: z.string().trim().min(1).max(20_000),
   diagnosticAnswers: z.record(z.string()).optional(),
+  sessionMode: z.enum(["teach", "explain"]).optional(),
 });
 
 export const app = new Hono();
@@ -38,10 +39,25 @@ app.post("/api/v1/runs", async (context) => {
   }
 
   const encoder = new TextEncoder();
+  let closed = false;
   const stream = new ReadableStream({
     start(controller) {
       const send = (event: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
+        }
+      };
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed by abort or a previous terminal event */
+        }
       };
 
       void agent
@@ -51,14 +67,17 @@ app.post("/api/v1/runs", async (context) => {
           // Agent Loop runs return a non-empty final message and need the
           // web-layer terminal event here.
           if (result.message.content) send({ type: "run.completed", runId: result.runId });
-          controller.close();
+          finish();
         })
         .catch((error) => {
           const message = error instanceof Error ? error.message : "Agent 运行失败";
           console.error(`[web-agent] ${message}`);
           send({ type: "error", message });
-          controller.close();
+          finish();
         });
+    },
+    cancel() {
+      closed = true;
     },
   });
 

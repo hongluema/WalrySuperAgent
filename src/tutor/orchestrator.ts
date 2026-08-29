@@ -17,7 +17,7 @@ const phaseLabels = {
   idle: "准备开始",
 };
 
-type RunOptions = { diagnosticAnswers?: Record<string, string> };
+type RunOptions = { diagnosticAnswers?: Record<string, string>; sessionMode?: "teach" | "explain" };
 
 function cardsFor(model: TopicModel): DiagnosticCard[] {
   return model.diagnosticDimensions.map((dimension, index) => ({
@@ -164,6 +164,7 @@ export class TutorOrchestrator {
       state.knownIntuitions ??= [];
       state.nodeLearningStates ??= {};
     }
+    state.sessionMode ??= options.sessionMode === "explain" ? "explain" : "teach";
 
     try {
       state.messages.push({ role: "user", content: message });
@@ -204,8 +205,8 @@ export class TutorOrchestrator {
           }
         }
         await emitThinking(emit, researchMaterial
-          ? "已找到参考资料，正在生成主题模型和诊断题…"
-          : "未取到检索结果，正在用已有知识生成主题模型和诊断题…");
+          ? (state.sessionMode === "explain" ? "已找到参考资料，正在生成讲解…" : "已找到参考资料，正在生成主题模型和诊断题…")
+          : (state.sessionMode === "explain" ? "未取到检索结果，正在用已有知识生成讲解…" : "未取到检索结果，正在用已有知识生成主题模型和诊断题…"));
         topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({
           userGoal,
           history: state.messages,
@@ -240,10 +241,13 @@ export class TutorOrchestrator {
         if (researchMaterial && verifiedSourceCount > 0) await emit({ type: "research.completed", sourceCount: verifiedSourceCount, researchedAt: new Date().toISOString() });
         await emit({ type: "topic.model.ready", title: topicModel.lessonTitle, outcome: topicModel.coreOutcome, topic: topicModel.topic });
 
-        if (isDirectHelpRequest(message)) {
+        if (state.sessionMode === "explain" || isDirectHelpRequest(message)) {
           state.phase = "teach";
-          await emit({ type: "tutor.phase.changed", phase: "teach", label: phaseLabels.teach });
-          const decision = await this.decide(message, state, topicModel, emit, signal);
+          await emit({ type: "tutor.phase.changed", phase: "teach", label: state.sessionMode === "explain" ? "正在讲解" : phaseLabels.teach });
+          const decision = buildFirstTeachingDecision(
+            topicModel,
+            state.sessionMode === "explain" ? "讲解模式，跳过摸底，直接开讲" : "用户要求直接讲解",
+          );
           state.lastDecision = decision;
           this.applyStatePatch(state, topicModel, decision);
           await emitRoadmap(state, emit);
@@ -477,7 +481,8 @@ export class TutorOrchestrator {
     const current = model.conceptRoute[state.activeConcept] ?? model.conceptRoute[0];
     const asked = current ? state.nodeLearningStates[current.id]?.questionsAsked ?? [] : [];
     if (
-      plannedQuestion
+      state.sessionMode !== "explain"
+      && plannedQuestion
       && !cardShowsQuestion
       && !hasAskedQuestion(text, plannedQuestion)
       && !questionAlreadyAsked(asked, plannedQuestion)

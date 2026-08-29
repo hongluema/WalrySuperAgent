@@ -26,6 +26,7 @@ export class TutorStore {
       }
       state.learnerProfile ??= [];
       state.nodeLearningStates ??= {};
+      state.sessionMode ??= "teach";
       return state;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;

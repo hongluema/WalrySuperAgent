@@ -22,6 +22,7 @@ export interface WebAgentRunInput {
   conversationId: string;
   message: string;
   diagnosticAnswers?: Record<string, string>;
+  sessionMode?: "teach" | "explain";
 }
 
 export interface WebAgentRunResult {
@@ -135,13 +136,13 @@ export class WebAgentService {
 
     const tutorSession = await this.tutor.hasActiveSession(input.conversationId);
     try {
-      if (tutorSession || this.tutor.isTutorIntent(input.message)) {
+      if (tutorSession || input.sessionMode || this.tutor.isTutorIntent(input.message)) {
         await this.tutor.run(
           input.conversationId,
           input.message,
           emit,
           signal,
-          { diagnosticAnswers: input.diagnosticAnswers },
+          { diagnosticAnswers: input.diagnosticAnswers, sessionMode: input.sessionMode },
         );
         await traceRecorder?.finish("completed");
         return {

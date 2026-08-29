@@ -760,6 +760,27 @@ test("uses a weixin article as source material and does not search", async () =>
   }
 });
 
+test("explain mode skips diagnostics and cannot be changed later", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-explain-mode-"));
+  try {
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
+    const events: TutorEvent[] = [];
+    await tutor.run("explain-session", "我想学习任意主题", (event) => { events.push(event); }, undefined, { sessionMode: "explain" });
+    assert.equal(events.some((event) => event.type === "diagnostic.card.ready"), false);
+    assert.ok(events.some((event) => event.type === "roadmap.ready"));
+    assert.ok(events.some((event) => event.type === "message.delta"));
+    const state = JSON.parse(await readFile(join(root, "sessions", "explain-session.json"), "utf8")) as TutorState;
+    assert.equal(state.sessionMode, "explain");
+    assert.equal(state.phase, "teach");
+
+    await tutor.run("explain-session", "接下来讲第二点", () => {}, undefined, { sessionMode: "teach" });
+    const locked = JSON.parse(await readFile(join(root, "sessions", "explain-session.json"), "utf8")) as TutorState;
+    assert.equal(locked.sessionMode, "explain");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("degrades explicitly when required search returns no usable content", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-grounding-failure-test-"));
   try {

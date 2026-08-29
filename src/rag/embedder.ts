@@ -1,4 +1,5 @@
 const DIMS = 128;
+const DASHSCOPE_EMBED_BATCH = 10;
 
 export type EmbeddingFn = (texts: string[]) => Promise<number[][]>;
 
@@ -6,28 +7,36 @@ export function createMockEmbedder(): EmbeddingFn {
   return async (texts: string[]) => texts.map(mockEmbed);
 }
 
+async function embedDashScopeBatch(apiKey: string, texts: string[]): Promise<number[][]> {
+  const resp = await fetch(
+    'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'text-embedding-v3',
+        input: texts,
+        dimensions: DIMS,
+      }),
+    },
+  );
+  if (!resp.ok) {
+    throw new Error(`Embedding API error: ${resp.status} ${await resp.text()}`);
+  }
+  const data = await resp.json() as any;
+  return data.data.map((d: any) => d.embedding as number[]);
+}
+
 export function createDashScopeEmbedder(apiKey: string): EmbeddingFn {
   return async (texts: string[]) => {
-    const resp = await fetch(
-      'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'text-embedding-v3',
-          input: texts,
-          dimensions: DIMS,
-        }),
-      },
-    );
-    if (!resp.ok) {
-      throw new Error(`Embedding API error: ${resp.status} ${await resp.text()}`);
+    const vectors: number[][] = [];
+    for (let i = 0; i < texts.length; i += DASHSCOPE_EMBED_BATCH) {
+      vectors.push(...await embedDashScopeBatch(apiKey, texts.slice(i, i + DASHSCOPE_EMBED_BATCH)));
     }
-    const data = await resp.json() as any;
-    return data.data.map((d: any) => d.embedding as number[]);
+    return vectors;
   };
 }
 

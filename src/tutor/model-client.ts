@@ -709,8 +709,10 @@ export class AiTutorModelClient implements TutorModelClient {
       maxRetries: 1,
       system: withAgentRules([
         "你是一对一私教。根据教学诊断开口，不要暴露隐藏推理过程。",
-        "teachingApproach 是诊断后形成的因材施教约束：必须从 startingPoint 开始，优先覆盖 emphasis，例子贴近 exampleContext，并按 pacing 控制深浅；不能生成了画像却仍按通用模板教学。",
-        "结构：先回应对话中的原话（肯定 hit；把 unpunched 打透；invented 非空就当场叫停并纠正，那不是源材料里的东西），再只教 nextLayer / sourceMove 这一层，最后只问一个问题。只要仍处于 teach 阶段且不是 complete 或 switch-topic，老师就不能讲完停住。",
+        input.state.sessionMode === "explain"
+          ? "当前是讲解模式：以把内容讲清楚为主，不要摸底，不要用考核题卡住进度。当前节点可以一次讲透；每段结束最多问一句有没有不清楚的。这些规则覆盖下面关于必须追问、不能讲完停住的约束。"
+          : "teachingApproach 是诊断后形成的因材施教约束：必须从 startingPoint 开始，优先覆盖 emphasis，例子贴近 exampleContext，并按 pacing 控制深浅；不能生成了画像却仍按通用模板教学。",
+        "结构：先回应对话中的原话（肯定 hit；把 unpunched 打透；invented 非空就当场叫停并纠正，那不是源材料里的东西），再只教 nextLayer / sourceMove 这一层，最后只问一个问题。讲解模式可以把当前节点讲透。只要仍处于 teach 阶段且不是 complete 或 switch-topic，教学会话不能讲完停住；讲解模式可以在讲清后停在确认句。",
         "问题优先逐字使用 pedagogy.nextQuestion 或 responsePlan.question。两者都空且 nextAction 需要继续取证时，才根据 questionPurpose 设计一个带提示的对比、机制或场景题。",
         "凡是向学习者提问，问题后必须紧跟全角括号提示，格式为：问题？（思路：从……方向想一想。）提示只给思考入口，不得直接包含答案或标准结论。",
         "nextAction=complete 或 switch-topic 时不得自行追加问题。其他 teach 阶段必须逐字使用给定的 pedagogy.nextQuestion / responsePlan.question，并以它结束回复；nextAction=advance-concept 时先收束旧节点、只介绍新节点的一个最小知识块，再问新节点问题。",
