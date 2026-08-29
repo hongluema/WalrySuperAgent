@@ -703,15 +703,45 @@ export class AiTutorModelClient implements TutorModelClient {
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     const activeConcept = input.topicModel.conceptRoute[input.state.activeConcept];
     const nodeState = activeConcept ? input.state.nodeLearningStates[activeConcept.id] : undefined;
+    if (input.state.sessionMode === "explain") {
+      const result = streamText({
+        model: this.model,
+        abortSignal,
+        maxRetries: 1,
+        system: withAgentRules([
+          "当前是讲解模式。这些规则覆盖一切摸底、追问、只教一层、必须提问的约束。",
+          "先根据用户给出的主题、原文或对话，自己判断它属于哪个领域。不要问用户属于哪个领域。",
+          "再从该领域里选择一个研究生水平的概念。不要选入门名词，要选该领域里真正需要推敲的概念。",
+          "一开始先讲清这个概念的核心知识，不要绕弯、不要先讲故事。",
+          "然后用一个贴近生活的类比建立直觉。不要用寓言故事。",
+          "结合用户提供的内容，解释关键对象、关系与机制。没有材料时，给一个最小的具体例子。",
+          "做正反或相近概念对比。说明实际价值、适用场景、代价与约束。",
+          "如果有边界，说明边界、前提、例外和常见误用。",
+          "最后用一句可记忆的话收束。",
+          "用简体中文。不要摸底，不要出考核题，不要列学习路线。",
+          "如果用户已经听过讲解并在追问，就顺着概念和类比回答，不要无故重开一篇完整讲解。",
+        ].join("\n")),
+        prompt: JSON.stringify({
+          userMessage: input.message,
+          topic: formatTopicContext(input.topicModel),
+        }),
+      });
+      let text = "";
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta") {
+          text += part.text;
+          await onDelta(part.text);
+        }
+      }
+      return text;
+    }
     const result = streamText({
       model: this.model,
       abortSignal,
       maxRetries: 1,
       system: withAgentRules([
         "你是一对一私教。根据教学诊断开口，不要暴露隐藏推理过程。",
-        input.state.sessionMode === "explain"
-          ? "当前是讲解模式：以把内容讲清楚为主，不要摸底，不要用考核题卡住进度。当前节点可以一次讲透；每段结束最多问一句有没有不清楚的。这些规则覆盖下面关于必须追问、不能讲完停住的约束。"
-          : "teachingApproach 是诊断后形成的因材施教约束：必须从 startingPoint 开始，优先覆盖 emphasis，例子贴近 exampleContext，并按 pacing 控制深浅；不能生成了画像却仍按通用模板教学。",
+        "teachingApproach 是诊断后形成的因材施教约束：必须从 startingPoint 开始，优先覆盖 emphasis，例子贴近 exampleContext，并按 pacing 控制深浅；不能生成了画像却仍按通用模板教学。",
         "结构：先回应对话中的原话（肯定 hit；把 unpunched 打透；invented 非空就当场叫停并纠正，那不是源材料里的东西），再只教 nextLayer / sourceMove 这一层，最后只问一个问题。讲解模式可以把当前节点讲透。只要仍处于 teach 阶段且不是 complete 或 switch-topic，教学会话不能讲完停住；讲解模式可以在讲清后停在确认句。",
         "问题优先逐字使用 pedagogy.nextQuestion 或 responsePlan.question。两者都空且 nextAction 需要继续取证时，才根据 questionPurpose 设计一个带提示的对比、机制或场景题。",
         "凡是向学习者提问，问题后必须紧跟全角括号提示，格式为：问题？（思路：从……方向想一想。）提示只给思考入口，不得直接包含答案或标准结论。",

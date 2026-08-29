@@ -767,7 +767,7 @@ test("explain mode skips diagnostics and cannot be changed later", async () => {
     const events: TutorEvent[] = [];
     await tutor.run("explain-session", "我想学习任意主题", (event) => { events.push(event); }, undefined, { sessionMode: "explain" });
     assert.equal(events.some((event) => event.type === "diagnostic.card.ready"), false);
-    assert.ok(events.some((event) => event.type === "roadmap.ready"));
+    assert.equal(events.some((event) => event.type === "roadmap.ready"), false);
     assert.ok(events.some((event) => event.type === "message.delta"));
     const state = JSON.parse(await readFile(join(root, "sessions", "explain-session.json"), "utf8")) as TutorState;
     assert.equal(state.sessionMode, "explain");

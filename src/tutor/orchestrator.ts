@@ -205,8 +205,8 @@ export class TutorOrchestrator {
           }
         }
         await emitThinking(emit, researchMaterial
-          ? (state.sessionMode === "explain" ? "已找到参考资料，正在生成讲解…" : "已找到参考资料，正在生成主题模型和诊断题…")
-          : (state.sessionMode === "explain" ? "未取到检索结果，正在用已有知识生成讲解…" : "未取到检索结果，正在用已有知识生成主题模型和诊断题…"));
+          ? (state.sessionMode === "explain" ? "已找到参考资料，正在组织讲解…" : "已找到参考资料，正在生成主题模型和诊断题…")
+          : (state.sessionMode === "explain" ? "未取到检索结果，正在组织讲解…" : "未取到检索结果，正在用已有知识生成主题模型和诊断题…"));
         topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({
           userGoal,
           history: state.messages,
@@ -246,11 +246,11 @@ export class TutorOrchestrator {
           await emit({ type: "tutor.phase.changed", phase: "teach", label: state.sessionMode === "explain" ? "正在讲解" : phaseLabels.teach });
           const decision = buildFirstTeachingDecision(
             topicModel,
-            state.sessionMode === "explain" ? "讲解模式，跳过摸底，直接开讲" : "用户要求直接讲解",
+            state.sessionMode === "explain" ? "讲解模式：先讲核心知识，再用生活类比建立直觉" : "用户要求直接讲解",
           );
           state.lastDecision = decision;
           this.applyStatePatch(state, topicModel, decision);
-          await emitRoadmap(state, emit);
+          if (state.sessionMode !== "explain") await emitRoadmap(state, emit);
           await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
           const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
           this.recordQuestion(state, topicModel, decision, responseText);
@@ -345,7 +345,7 @@ export class TutorOrchestrator {
         scoredNode ? state.nodeLearningStates[scoredNode.id] : undefined,
       );
       await emit({ type: "assessment.updated", score: progress.score, status: progress.status });
-      await emitRoadmap(state, emit);
+      if (state.sessionMode !== "explain") await emitRoadmap(state, emit);
       const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
       this.recordQuestion(state, topicModel, decision, responseText);
       await this.persist(state, runId, emit);
