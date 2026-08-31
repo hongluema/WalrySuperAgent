@@ -246,7 +246,7 @@ export class TutorOrchestrator {
           await emit({ type: "tutor.phase.changed", phase: "teach", label: state.sessionMode === "explain" ? "正在讲解" : phaseLabels.teach });
           const decision = buildFirstTeachingDecision(
             topicModel,
-            state.sessionMode === "explain" ? "讲解模式：先讲核心知识，再用生活类比建立直觉" : "用户要求直接讲解",
+            state.sessionMode === "explain" ? "讲解模式：先讲核心知识，再结合例子讲清机制" : "用户要求直接讲解",
           );
           state.lastDecision = decision;
           this.applyStatePatch(state, topicModel, decision);
