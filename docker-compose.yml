@@ -1,0 +1,11 @@
+services:
+  walry-super-agent:
+    build: .
+    container_name: walry-super-agent
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      WALRY_WEB_HOST: 127.0.0.1
+      WALRY_WEB_PORT: 3100

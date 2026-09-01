@@ -108,6 +108,7 @@ function isMainModule(): boolean {
 
 if (isMainModule()) {
   const port = Number(process.env.WALRY_WEB_PORT ?? 3100);
-  serve({ fetch: app.fetch, port });
-  console.log(`[web-agent] listening on http://127.0.0.1:${port}`);
+  const hostname = process.env.WALRY_WEB_HOST ?? "127.0.0.1";
+  serve({ fetch: app.fetch, port, hostname });
+  console.log(`[web-agent] listening on http://${hostname}:${port}`);
 }
