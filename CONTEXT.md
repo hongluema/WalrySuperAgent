@@ -8,6 +8,14 @@ WalrySuperAgent turns an open-ended learning request into a durable, evidence-dr
 A durable course for one learning goal inside a Conversation. Its evidence and progress never leak into another Learning Session.
 _Avoid_: Topic chat, course thread
 
+**Conversation Selection**:
+The current Learning Session selected inside a Conversation. It is a pointer, not a second copy of the course state.
+_Avoid_: Current session snapshot, active course record
+
+**Learning Event**:
+An immutable audit record of a persisted Learning Session change.
+_Avoid_: State copy, chat message
+
 **Subject Classification**:
 A versioned, user-correctable description of the subject area a Learning Session belongs to. It selects defaults and constraints but never decides pedagogy or mastery by itself.
 _Avoid_: Teacher type, agent type

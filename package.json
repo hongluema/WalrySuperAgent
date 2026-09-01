@@ -8,7 +8,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "web": "tsx src/web/server.ts",
-    "test": "node --import tsx --test src/agent/loop.test.ts src/tutor/domain/catalog.test.ts src/tutor/routing/turn-resolver.test.ts src/tutor/store.test.ts src/tutor/orchestrator.test.ts src/tools/weixin-article.test.ts src/rag/embedder.test.ts",
+    "test": "node --import tsx --test src/agent/loop.test.ts src/tutor/domain/catalog.test.ts src/tutor/routing/turn-resolver.test.ts src/tutor/store.test.ts src/tutor/postgres-store.test.ts src/tutor/orchestrator.test.ts src/tools/weixin-article.test.ts src/rag/embedder.test.ts",
     "init": "tsx src/index.ts init",
     "continue": "tsx src/index.ts --continue",
     "trace:inspect": "tsx src/trace/inspect.ts"
@@ -21,6 +21,7 @@
     "croner": "^10.0.1",
     "dotenv": "16.5.0",
     "hono": "4.7.10",
+    "pg": "^8.23.0",
     "turndown": "^7.2.4",
     "undici": "^6.21.3",
     "zod": "3.25.76"
@@ -28,6 +29,7 @@
   "devDependencies": {
     "@modelcontextprotocol/server-github": "2025.4.8",
     "@types/node": "22.15.3",
+    "@types/pg": "^8.23.1",
     "@types/turndown": "^5.0.6",
     "tsx": "4.19.4",
     "typescript": "5.8.3"
