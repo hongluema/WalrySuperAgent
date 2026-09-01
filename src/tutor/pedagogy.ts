@@ -4,9 +4,11 @@ import type {
   NodeLearningState,
   QuestionPurpose,
   TopicModel,
+  TurnResolution,
   TutorAnswerEvaluation,
   TutorTurnDecision,
 } from "./types.js";
+import { resolveMasteryPolicy } from "./domain/catalog.js";
 
 function nodeAt(model: TopicModel, index: number) {
   return model.conceptRoute[index] ?? model.conceptRoute[0];
@@ -57,9 +59,7 @@ const coreCriteria: EvidenceCriterion[] = ["accurate", "explained", "discriminat
 const bannedQuestionPattern = /最关键的区别|机制或作用是什么|再用一句话说明|为什么会产生这种结果|根据刚才介绍的内容/;
 
 function requiredCriteria(model: TopicModel, activeConcept: number): EvidenceCriterion[] {
-  const concept = nodeAt(model, activeConcept);
-  const rubric = model.rubricAnchors.find((item) => item.conceptId === concept?.id);
-  return rubric?.performance?.trim() ? [...coreCriteria, "performance"] : coreCriteria;
+  return resolveMasteryPolicy(model, activeConcept).requiredCriteria;
 }
 
 export function nodeProgress(
@@ -184,6 +184,176 @@ type EvidenceDrivenDecisionInput = {
   nodeState?: NodeLearningState;
   evaluation: TutorAnswerEvaluation;
 };
+
+/**
+ * 显式教学指令不经过答案评分，因此永远不产生掌握证据。
+ * 返回 undefined 表示这轮仍应走正常的答案评估链路。
+ */
+export function buildResolvedActionDecision(
+  model: TopicModel,
+  activeConcept: number,
+  resolution: TurnResolution,
+): TutorTurnDecision | undefined {
+  const current = nodeAt(model, activeConcept);
+  const title = current?.title ?? "当前概念";
+  const target = current?.target ?? model.coreOutcome;
+  const emptyAssessment = {
+    status: "not-answered" as const,
+    rubricEvidence: [],
+    evidence: [],
+  };
+  const base = {
+    understoodMeaning: `用户本轮请求：${resolution.primaryIntent}`,
+    evidence: [{ quote: resolution.requestedTopic ?? "", implication: resolution.reasonCodes.join("、") }].filter((item) => item.quote),
+    assessment: emptyAssessment,
+    misconceptionUpdates: [],
+    statePatch: {},
+  };
+
+  if (resolution.sessionCommand === "SWITCH") {
+    return {
+      ...base,
+      intent: "topic_switch",
+      nextAction: "switch-topic",
+      responsePlan: {
+        goal: `确认切换到“${resolution.requestedTopic ?? "新主题"}”，并保留当前课程进度`,
+        teachingAtom: "主题切换",
+        gapToRepair: "新学习会话尚未建立",
+        keyPoints: [resolution.requestedTopic ?? "新主题"],
+        allowedContent: ["确认新主题", "说明当前进度已保留"],
+        forbiddenContent: ["覆盖当前 TopicModel", "继续推进当前诊断或节点", "声称新路线已经创建"],
+      },
+    };
+  }
+
+  if (resolution.sessionCommand === "PAUSE") {
+    return {
+      ...base,
+      intent: "stop",
+      nextAction: "complete",
+      responsePlan: {
+        goal: "暂停当前课程并保留进度",
+        teachingAtom: "暂停",
+        gapToRepair: "",
+        keyPoints: [],
+        allowedContent: ["确认进度已保留"],
+        forbiddenContent: ["继续诊断", "继续讲解", "推进掌握状态"],
+      },
+    };
+  }
+
+  if (resolution.sessionCommand === "RESUME") {
+    const question = openingQuestion(current);
+    return {
+      ...base,
+      intent: "clarification",
+      nextAction: "ask-clarification",
+      responsePlan: {
+        goal: `从“${title}”继续当前课程`,
+        teachingAtom: target,
+        gapToRepair: "恢复到暂停前的学习位置",
+        keyPoints: [target],
+        allowedContent: [title, target],
+        forbiddenContent: ["重建课程", "增加掌握证据", "推进到下一节点"],
+        question,
+      },
+      pedagogy: {
+        hit: "",
+        unpunched: "恢复当前学习位置",
+        invented: "",
+        nextLayer: target,
+        sourceMove: target,
+        nextQuestion: question ?? "",
+        questionPurpose: "accurate",
+        restatedBiography: false,
+      },
+    };
+  }
+
+  type ActionConfig = {
+    intent: TutorTurnDecision["intent"];
+    nextAction: TutorTurnDecision["nextAction"];
+    goal: string;
+    gap: string;
+    unpunched: string;
+    purpose: QuestionPurpose;
+    allowed: string[];
+    forbidden: string[];
+  };
+  let config: ActionConfig | undefined;
+  if (resolution.explicitAction === "DEMONSTRATE") {
+    config = {
+      intent: "clarification",
+      nextAction: "give-example",
+      goal: `用一个新的具体例子讲清“${title}”`,
+      gap: "当前解释缺少学习者需要的具体场景",
+      unpunched: "需要新的具体例子",
+      purpose: "accurate",
+      allowed: [title, target, ...model.boundaryCases],
+      forbidden: ["把请求例子算成掌握证据", "推进到下一节点"],
+    };
+  } else if (resolution.explicitAction === "EXPLAIN") {
+    config = {
+      intent: "direct_answer_request",
+      nextAction: "explain",
+      goal: `直接讲清“${title}”`,
+      gap: "学习者要求先获得直接讲解",
+      unpunched: "需要直接讲解",
+      purpose: "accurate",
+      allowed: [title, target, ...model.boundaryCases],
+      forbidden: ["把讲解请求算成掌握证据", "推进到下一节点"],
+    };
+  } else if (resolution.explicitAction === "GIVE_HINT") {
+    config = {
+      intent: "dont_know",
+      nextAction: "give-example",
+      goal: `给出能继续思考“${title}”的最小提示`,
+      gap: "学习者需要提示但尚未提交独立答案",
+      unpunched: "需要最小提示",
+      purpose: "accurate",
+      allowed: ["思考入口", "一个局部线索"],
+      forbidden: ["直接给完整答案", "把提示后的复述算成独立证据", "推进到下一节点"],
+    };
+  } else if (resolution.explicitAction === "GUIDED_PRACTICE" || resolution.explicitAction === "ASSESS") {
+    config = {
+      intent: "clarification",
+      nextAction: "give-practice",
+      goal: resolution.explicitAction === "ASSESS" ? `检查“${title}”的当前掌握证据` : `围绕“${title}”给一个练习`,
+      gap: "需要通过学习者作答获得表现证据",
+      unpunched: "等待学习者完成练习",
+      purpose: resolution.explicitAction === "ASSESS" ? "discrimination" : "transfer",
+      allowed: [title, target, model.practiceTarget],
+      forbidden: ["同时给出答案", "未作答就增加掌握证据", "推进到下一节点"],
+    };
+  }
+  if (!config) return undefined;
+
+  const question = openingQuestion(current);
+  return {
+    ...base,
+    intent: config.intent,
+    nextAction: config.nextAction,
+    responsePlan: {
+      goal: config.goal,
+      teachingAtom: target,
+      gapToRepair: config.gap,
+      keyPoints: [target],
+      allowedContent: config.allowed,
+      forbiddenContent: config.forbidden,
+      question,
+    },
+    pedagogy: {
+      hit: "",
+      unpunched: config.unpunched,
+      invented: "",
+      nextLayer: target,
+      sourceMove: target,
+      nextQuestion: question ?? "",
+      questionPurpose: config.purpose,
+      restatedBiography: false,
+    },
+  };
+}
 
 export function buildEvidenceDrivenDecision(input: EvidenceDrivenDecisionInput): TutorTurnDecision {
   const { model, activeConcept, nodeState } = input;

@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { DiagnosticCard, TopicModel, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
+import type { ClientTutorCommand, DiagnosticCard, TopicModel, TurnResolution, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
-import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, questionAlreadyAsked, withThinkingHint } from "./pedagogy.js";
+import { buildEvidenceDrivenDecision, buildFallbackTurnDecision, buildFirstTeachingDecision, buildIntroDecision, buildResolvedActionDecision, DIAGNOSE_INTRO_TEXT, hasAskedQuestion, nodeProgress, questionAlreadyAsked, withThinkingHint } from "./pedagogy.js";
+import { TurnResolver } from "./routing/turn-resolver.js";
 import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 import { extractWeixinUrls, fetchWeixinArticle, stripWeixinUrls, type SourceArticle } from "../tools/weixin-article.js";
+import { DomainCatalog, MACRO_DOMAIN_LABELS, resolveMasteryPolicy } from "./domain/catalog.js";
 
 const phaseLabels = {
   research: "正在建立学习对象与能力模型",
@@ -17,7 +19,13 @@ const phaseLabels = {
   idle: "准备开始",
 };
 
-type RunOptions = { diagnosticAnswers?: Record<string, string>; sessionMode?: "teach" | "explain" };
+type RunOptions = {
+  diagnosticAnswers?: Record<string, string>;
+  sessionMode?: "teach" | "explain";
+  learningSessionId?: string;
+  turnResolution?: TurnResolution;
+  clientCommand?: ClientTutorCommand;
+};
 
 function cardsFor(model: TopicModel): DiagnosticCard[] {
   return model.diagnosticDimensions.map((dimension, index) => ({
@@ -78,10 +86,16 @@ async function emitThinking(emit: (event: TutorEvent) => Promise<void> | void, t
   await emit({ type: "reasoning.delta", text: text.endsWith("\n") ? text : `${text}\n` });
 }
 
-function emptyState(conversationId: string): TutorState {
+function newLearningSessionId(): string {
+  return `learn_${randomUUID().replace(/-/gu, "").slice(0, 16)}`;
+}
+
+function emptyState(conversationId: string, learningSessionId = newLearningSessionId()): TutorState {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     conversationId,
+    learningSessionId,
+    sessionStatus: "active",
     phase: "idle",
     diagnosticCards: [],
     diagnosticAnswers: {},
@@ -98,6 +112,9 @@ function emptyState(conversationId: string): TutorState {
 }
 
 export class TutorOrchestrator {
+  private readonly turnResolver: TurnResolver;
+  private readonly domainCatalog = new DomainCatalog();
+
   constructor(
     private readonly store = new TutorStore(),
     private readonly modelClient?: TutorModelClient,
@@ -108,15 +125,37 @@ export class TutorOrchestrator {
       return truncateResult(text, tool.maxResultChars);
     },
     private readonly fetchSource: (url: string) => Promise<SourceArticle> = fetchWeixinArticle,
-  ) {}
+    turnResolver?: TurnResolver,
+  ) {
+    const classifySemantic = modelClient?.classifyTurn
+      ? (input: Parameters<NonNullable<TutorModelClient["classifyTurn"]>>[0]) => modelClient.classifyTurn!(input)
+      : undefined;
+    this.turnResolver = turnResolver ?? new TurnResolver(classifySemantic);
+  }
 
-  async hasActiveSession(conversationId: string): Promise<boolean> {
-    const state = await this.store.load(conversationId);
-    return Boolean(state && state.phase !== "idle");
+  async hasActiveSession(conversationId: string, learningSessionId?: string): Promise<boolean> {
+    const state = await this.store.load(conversationId, learningSessionId);
+    return Boolean(state && state.phase !== "idle" && state.sessionStatus === "active");
   }
 
   isTutorIntent(message: string): boolean {
     return isSystematicLearningIntent(message);
+  }
+
+  async resolveTurn(
+    conversationId: string,
+    message: string,
+    options: Pick<RunOptions, "sessionMode" | "learningSessionId" | "clientCommand"> = {},
+  ): Promise<TurnResolution> {
+    const state = await this.store.load(conversationId, options.learningSessionId);
+    return this.turnResolver.resolve({
+      message,
+      hasActiveSession: Boolean(state && state.phase !== "idle"),
+      phase: state?.phase,
+      currentTopic: state?.topicModel?.topic ?? state?.topic,
+      sessionMode: state?.sessionMode ?? options.sessionMode,
+      clientCommand: options.clientCommand,
+    });
   }
 
   private async decide(message: string, state: TutorState, topicModel: TopicModel, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
@@ -155,27 +194,105 @@ export class TutorOrchestrator {
     if (!this.modelClient) throw new Error("Tutor 模型客户端未配置，无法进行动态主题建模");
 
     const runId = `run_${randomUUID().slice(0, 8)}`;
-    await emit({ type: "run.started", runId, conversationId });
-    let state = await this.store.load(conversationId);
-    if (!state) state = emptyState(conversationId);
+    let state = await this.store.load(conversationId, options.learningSessionId);
+    if (!state) state = emptyState(conversationId, options.learningSessionId);
     else {
-      state.schemaVersion = 4;
+      state.schemaVersion = 5;
       state.learnerProfile ??= [];
       state.knownIntuitions ??= [];
       state.nodeLearningStates ??= {};
     }
+    const previouslySelectedState = options.learningSessionId
+      ? await this.store.load(conversationId)
+      : state;
+    await emit({ type: "run.started", runId, conversationId, learningSessionId: state.learningSessionId });
+    const turnResolution = options.turnResolution ?? await this.turnResolver.resolve({
+      message,
+      hasActiveSession: state.phase !== "idle",
+      phase: state.phase,
+      currentTopic: state.topicModel?.topic ?? state.topic,
+      sessionMode: state.sessionMode ?? options.sessionMode,
+      clientCommand: options.clientCommand,
+    });
+    await emit({ type: "turn.intent.resolved", resolution: turnResolution });
+    if (turnResolution.target === "generic") {
+      await emit({ type: "run.completed", runId });
+      return;
+    }
     state.sessionMode ??= options.sessionMode === "explain" ? "explain" : "teach";
 
     try {
+      if (
+        previouslySelectedState
+        && previouslySelectedState.learningSessionId !== state.learningSessionId
+      ) {
+        if (previouslySelectedState.sessionStatus === "active") {
+          previouslySelectedState.sessionStatus = "paused";
+          previouslySelectedState.updatedAt = new Date().toISOString();
+          await this.store.save(previouslySelectedState, { type: "learning.session.paused", runId });
+          await emit({ type: "learning.session.paused", learningSessionId: previouslySelectedState.learningSessionId });
+        }
+        state.sessionStatus = "active";
+        await emit({
+          type: "learning.session.switched",
+          fromLearningSessionId: previouslySelectedState.learningSessionId,
+          toLearningSessionId: state.learningSessionId,
+        });
+      }
+      if (turnResolution.sessionCommand === "SWITCH" && state.topicModel) {
+        const previousLearningSessionId = state.learningSessionId;
+        state.sessionStatus = "paused";
+        state.updatedAt = new Date().toISOString();
+        await this.store.save(state, { type: "learning.session.paused", runId });
+        await emit({ type: "learning.session.paused", learningSessionId: previousLearningSessionId });
+
+        state = emptyState(conversationId);
+        state.sessionMode = "teach";
+        await emit({
+          type: "learning.session.switched",
+          fromLearningSessionId: previousLearningSessionId,
+          toLearningSessionId: state.learningSessionId,
+        });
+        await emit({
+          type: "learning.session.created",
+          learningSessionId: state.learningSessionId,
+          topic: turnResolution.requestedTopic,
+        });
+      }
       state.messages.push({ role: "user", content: message });
       let topicModel = state.topicModel ? ensureTopicModelDefaults(state.topicModel) : undefined;
+
+      if (options.clientCommand?.type === "UPDATE_SUBJECT") {
+        if (!topicModel) throw new Error("当前没有可修改学科分类的学习课程");
+        topicModel = this.domainCatalog.correctSubject(topicModel, options.clientCommand.correction);
+        state.topicModel = topicModel;
+        state.turnCount += 1;
+        const classification = topicModel.subjectClassification!;
+        const domainPackIds = topicModel.domainPackIds ?? [];
+        const domainCatalogVersion = topicModel.domainCatalogVersion!;
+        await emit({ type: "subject.classification.updated", classification, domainPackIds, domainCatalogVersion });
+        const responseText = `已将这门课程的学科分类修改为 ${MACRO_DOMAIN_LABELS[classification.macroDomain]}${classification.subdomainPath.length ? ` / ${classification.subdomainPath.join(" / ")}` : ""}。学习路线、进度和已有掌握证据均保持不变。`;
+        await emit({ type: "message.delta", text: responseText });
+        state.messages.push({ role: "assistant", content: responseText });
+        await this.persist(state, runId, emit, {
+          type: "subject.classification.updated",
+          runId,
+          classification,
+          domainPackIds,
+          domainCatalogVersion,
+        });
+        await emit({ type: "run.completed", runId });
+        return;
+      }
 
       const isNewTopic = !topicModel;
 
       if (isNewTopic) {
         await emit({ type: "tutor.phase.changed", phase: "research", label: phaseLabels.research });
         let researchMaterial: string | undefined;
-        let userGoal = message;
+        let userGoal = turnResolution.sessionCommand === "SWITCH"
+          ? turnResolution.requestedTopic ?? message
+          : message;
         let sourceUrl = "";
         const weixinUrls = extractWeixinUrls(message);
         if (weixinUrls[0]) {
@@ -240,6 +357,12 @@ export class TutorOrchestrator {
         const verifiedSourceCount = topicModel.grounding.sources.filter((source) => source.verified).length;
         if (researchMaterial && verifiedSourceCount > 0) await emit({ type: "research.completed", sourceCount: verifiedSourceCount, researchedAt: new Date().toISOString() });
         await emit({ type: "topic.model.ready", title: topicModel.lessonTitle, outcome: topicModel.coreOutcome, topic: topicModel.topic });
+        await emit({
+          type: "subject.classification.resolved",
+          classification: topicModel.subjectClassification!,
+          domainPackIds: topicModel.domainPackIds ?? [],
+          domainCatalogVersion: topicModel.domainCatalogVersion!,
+        });
 
         if (state.sessionMode === "explain" || isDirectHelpRequest(message)) {
           state.phase = "teach";
@@ -276,6 +399,27 @@ export class TutorOrchestrator {
       }
 
       if (!topicModel) throw new Error("当前会话缺少动态 TopicModel");
+
+      const resolvedDecision = buildResolvedActionDecision(topicModel, state.activeConcept, turnResolution);
+      if (resolvedDecision) {
+        state.turnCount += 1;
+        if (turnResolution.sessionCommand === "PAUSE") state.sessionStatus = "paused";
+        if (turnResolution.sessionCommand === "RESUME") state.sessionStatus = "active";
+        state.lastDecision = resolvedDecision;
+        this.applyStatePatch(state, topicModel, resolvedDecision);
+        await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, resolvedDecision, resolvedDecision.thinking ?? "") });
+        const responseText = await this.streamResponse(state, topicModel, resolvedDecision, message, emit, signal);
+        this.recordQuestion(state, topicModel, resolvedDecision, responseText);
+        await this.persist(state, runId, emit);
+        if (turnResolution.sessionCommand === "PAUSE") {
+          await emit({ type: "learning.session.paused", learningSessionId: state.learningSessionId });
+        }
+        if (turnResolution.sessionCommand === "RESUME") {
+          await emit({ type: "learning.session.resumed", learningSessionId: state.learningSessionId });
+        }
+        await emit({ type: "run.completed", runId });
+        return;
+      }
 
       if (state.phase === "diagnose") {
         const answers = options.diagnosticAnswers ?? {};
@@ -411,9 +555,8 @@ export class TutorOrchestrator {
       const index = model.conceptRoute.findIndex((item) => item.id === decision.statePatch.masteredConceptId);
       const nodeState = index >= 0 ? state.nodeLearningStates[decision.statePatch.masteredConceptId] : undefined;
       const sufficient = new Set(nodeState?.evidence.filter((item) => item.strength === "sufficient").map((item) => item.criterion));
-      const rubric = model.rubricAnchors.find((item) => item.conceptId === decision.statePatch.masteredConceptId);
-      const required = ["accurate", "explained", "discrimination", "transfer", ...(rubric?.performance?.trim() ? ["performance"] : [])];
-      const hasRequiredEvidence = required.every((criterion) => sufficient.has(criterion as any));
+      const required = resolveMasteryPolicy(model, index).requiredCriteria;
+      const hasRequiredEvidence = required.every((criterion) => sufficient.has(criterion));
       const hasOpenMisconception = nodeState?.misconceptions.some((item) => item.status === "open") ?? false;
       if (index >= 0 && state.roadmap[index] && hasRequiredEvidence && !hasOpenMisconception && nodeState?.stage === "doubt-check") {
         state.roadmap[index].status = "mastered";
@@ -495,10 +638,16 @@ export class TutorOrchestrator {
     return text;
   }
 
-  private async persist(state: TutorState, runId: string, emit: (event: TutorEvent) => Promise<void> | void) {
+  private async persist(
+    state: TutorState,
+    runId: string,
+    emit: (event: TutorEvent) => Promise<void> | void,
+    storeEvent: unknown = { type: "state.saved", runId, phase: state.phase, activeConcept: state.activeConcept },
+  ) {
     state.updatedAt = new Date().toISOString();
-    await this.store.save(state, { type: "state.saved", runId, phase: state.phase, activeConcept: state.activeConcept });
-    await emit({ type: "state.saved", phase: state.phase, activeConcept: state.activeConcept });
+    if (state.phase === "complete") state.sessionStatus = "completed";
+    await this.store.save(state, storeEvent);
+    await emit({ type: "state.saved", phase: state.phase, activeConcept: state.activeConcept, learningSessionId: state.learningSessionId });
   }
 }
 

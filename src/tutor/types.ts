@@ -6,7 +6,66 @@ export type TutorPhase =
   | "teach"
   | "complete";
 
-export type TutorTurnIntent =
+export type LearningSessionStatus = "active" | "paused" | "completed";
+
+export type MacroDomain =
+  | "formal-sciences"
+  | "natural-and-health-sciences"
+  | "computing-and-engineering"
+  | "social-and-behavioral-sciences"
+  | "business-economics-and-law"
+  | "humanities"
+  | "language-and-communication"
+  | "arts-and-design"
+  | "life-and-work-practice";
+
+export type KnowledgeType =
+  | "factual"
+  | "conceptual"
+  | "causal"
+  | "procedural"
+  | "formal"
+  | "strategic"
+  | "language"
+  | "argument";
+
+export type DomainPackId =
+  | "generic"
+  | "formal-stem"
+  | "software-engineering"
+  | "language-communication"
+  | "argument-case"
+  | "high-risk-policy";
+
+export type SubjectClassification = {
+  macroDomain: MacroDomain;
+  subdomainPath: string[];
+  secondaryDomains: MacroDomain[];
+  confidence: number;
+  source: "inferred" | "user-corrected";
+  version: string;
+};
+
+export type SubjectCorrection = {
+  macroDomain: MacroDomain;
+  subdomainPath?: string[];
+  secondaryDomains?: MacroDomain[];
+};
+
+export type ClientTutorCommand = {
+  type: "UPDATE_SUBJECT";
+  correction: SubjectCorrection;
+};
+
+export type LearningSessionSummary = {
+  learningSessionId: string;
+  topic?: string;
+  lessonTitle?: string;
+  status: LearningSessionStatus;
+  updatedAt: string;
+};
+
+export type LearnerResponseIntent =
   | "answer"
   | "dont_know"
   | "no_doubts"
@@ -16,6 +75,56 @@ export type TutorTurnIntent =
   | "topic_switch"
   | "meta_question"
   | "stop";
+
+/** @deprecated 使用 LearnerResponseIntent；保留别名以兼容现有状态文件与调用方。 */
+export type TutorTurnIntent = LearnerResponseIntent;
+
+/** 用户这一轮想做什么；与答案证据意图 TutorTurnIntent 分开。 */
+export type UserIntent =
+  | "START_LEARNING"
+  | "ASK_QUESTION"
+  | "REQUEST_EXPLANATION"
+  | "REQUEST_EXAMPLE"
+  | "REQUEST_HINT"
+  | "REQUEST_PRACTICE"
+  | "REQUEST_ASSESSMENT"
+  | "SUBMIT_ANSWER"
+  | "REPORT_CONFUSION"
+  | "CHALLENGE_FEEDBACK"
+  | "CHANGE_GOAL"
+  | "PAUSE"
+  | "RESUME"
+  | "STOP";
+
+export type SessionCommand = "NONE" | "CREATE" | "CONTINUE" | "MODIFY" | "SWITCH" | "PAUSE" | "RESUME" | "END";
+
+export type PedagogicalAction =
+  | "CLARIFY_GOAL"
+  | "BUILD_PLAN"
+  | "DIAGNOSE"
+  | "EXPLAIN"
+  | "DEMONSTRATE"
+  | "GUIDED_PRACTICE"
+  | "INDEPENDENT_PRACTICE"
+  | "GIVE_HINT"
+  | "ASSESS"
+  | "REPAIR"
+  | "REVIEW"
+  | "TRANSFER"
+  | "COMPLETE";
+
+export type TurnResolution = {
+  target: "tutor" | "generic";
+  mode: "quick" | "course";
+  intents: Array<{ type: UserIntent; confidence: number }>;
+  primaryIntent: UserIntent;
+  sessionCommand: SessionCommand;
+  requestedTopic?: string;
+  explicitAction?: PedagogicalAction;
+  confidence: number;
+  reasonCodes: string[];
+  policyVersion: string;
+};
 
 export type TopicRubricAnchor = {
   conceptId: string;
@@ -122,6 +231,8 @@ export type TopicModel = {
     target: string;
     openingQuestion: string;
     openingHint: string;
+    knowledgeTypes?: KnowledgeType[];
+    requiredCapabilities?: string[];
   }>;
   boundaryCases: string[];
   practiceTarget: string;
@@ -139,6 +250,9 @@ export type TopicModel = {
     limitations: string[];
   };
   capabilities: LearningCapabilityPlan;
+  subjectClassification?: SubjectClassification;
+  domainPackIds?: DomainPackId[];
+  domainCatalogVersion?: string;
 };
 
 export type TutorDiagnosis = {
@@ -258,8 +372,10 @@ export type VisibleReasoningTrace = {
 };
 
 export type TutorState = {
-  schemaVersion: 1 | 2 | 3 | 4;
+  schemaVersion: 1 | 2 | 3 | 4 | 5;
   conversationId: string;
+  learningSessionId: string;
+  sessionStatus: LearningSessionStatus;
   phase: TutorPhase;
   topic?: string;
   lessonTitle?: string;
@@ -282,12 +398,19 @@ export type TutorState = {
 };
 
 export type TutorEvent =
-  | { type: "run.started"; runId: string; conversationId: string }
+  | { type: "run.started"; runId: string; conversationId: string; learningSessionId?: string }
+  | { type: "turn.intent.resolved"; resolution: TurnResolution }
+  | { type: "learning.session.created"; learningSessionId: string; topic?: string }
+  | { type: "learning.session.switched"; fromLearningSessionId: string; toLearningSessionId: string }
+  | { type: "learning.session.paused"; learningSessionId: string }
+  | { type: "learning.session.resumed"; learningSessionId: string }
   | { type: "tutor.phase.changed"; phase: TutorPhase; label: string }
   | { type: "research.completed"; sourceCount: number; researchedAt: string }
   | { type: "grounding.degraded"; reason: string }
   | { type: "model.degraded"; stage: "decision" | "response"; reason: string }
   | { type: "topic.model.ready"; title: string; outcome: string; topic: string }
+  | { type: "subject.classification.resolved"; classification: SubjectClassification; domainPackIds: DomainPackId[]; domainCatalogVersion: string }
+  | { type: "subject.classification.updated"; classification: SubjectClassification; domainPackIds: DomainPackId[]; domainCatalogVersion: string }
   | { type: "topic.background.ready"; summary: string }
   | { type: "diagnostic.cards.ready"; cards: DiagnosticCard[] }
   | { type: "diagnostic.card.ready"; card: DiagnosticCard }
@@ -296,7 +419,7 @@ export type TutorEvent =
   | { type: "reasoning.delta"; text: string }
   | { type: "reasoning.trace.ready"; trace: VisibleReasoningTrace }
   | { type: "assessment.updated"; score: number; status: "in-progress" | "mastered" }
-  | { type: "state.saved"; phase: TutorPhase; activeConcept: number }
+  | { type: "state.saved"; phase: TutorPhase; activeConcept: number; learningSessionId?: string }
   | { type: "message.delta"; text: string }
   | { type: "run.completed"; runId: string }
   | { type: "run.failed"; runId: string; message: string };

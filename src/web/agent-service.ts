@@ -14,15 +14,17 @@ import type { SuperAgentConfig } from "../config/schema.js";
 import { calculatorTool, weatherTool } from "../tools/utility-tools.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { TutorOrchestrator } from "../tutor/orchestrator.js";
-import type { TutorEvent, VisibleReasoningTrace } from "../tutor/types.js";
+import type { ClientTutorCommand, TutorEvent, VisibleReasoningTrace } from "../tutor/types.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
 import { AiTutorModelClient } from "../tutor/model-client.js";
 
 export interface WebAgentRunInput {
   conversationId: string;
+  learningSessionId?: string;
   message: string;
   diagnosticAnswers?: Record<string, string>;
   sessionMode?: "teach" | "explain";
+  clientCommand?: ClientTutorCommand;
 }
 
 export interface WebAgentRunResult {
@@ -134,15 +136,25 @@ export class WebAgentService {
       await onEvent?.(event);
     };
 
-    const tutorSession = await this.tutor.hasActiveSession(input.conversationId);
     try {
-      if (tutorSession || input.sessionMode || this.tutor.isTutorIntent(input.message)) {
+      const turnResolution = await this.tutor.resolveTurn(input.conversationId, input.message, {
+        sessionMode: input.sessionMode,
+        learningSessionId: input.learningSessionId,
+        clientCommand: input.clientCommand,
+      });
+      if (turnResolution.target === "tutor") {
         await this.tutor.run(
           input.conversationId,
           input.message,
           emit,
           signal,
-          { diagnosticAnswers: input.diagnosticAnswers, sessionMode: input.sessionMode },
+          {
+            diagnosticAnswers: input.diagnosticAnswers,
+            sessionMode: input.sessionMode,
+            learningSessionId: input.learningSessionId,
+            clientCommand: input.clientCommand,
+            turnResolution,
+          },
         );
         await traceRecorder?.finish("completed");
         return {
@@ -151,6 +163,7 @@ export class WebAgentService {
           message: { role: "assistant", content: "" },
         };
       }
+      await emit({ type: "turn.intent.resolved", resolution: turnResolution });
 
       const messages = this.sessions.get(input.conversationId) ?? [];
       messages.push({ role: "user", content: input.message });

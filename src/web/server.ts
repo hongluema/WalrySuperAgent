@@ -4,12 +4,22 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { z } from "zod";
 import { WebAgentService } from "./agent-service.js";
+import { MACRO_DOMAINS } from "../tutor/domain/catalog.js";
 
 const runSchema = z.object({
   conversationId: z.string().trim().min(1).max(120),
+  learningSessionId: z.string().trim().min(1).max(120).optional(),
   message: z.string().trim().min(1).max(20_000),
   diagnosticAnswers: z.record(z.string()).optional(),
   sessionMode: z.enum(["teach", "explain"]).optional(),
+  clientCommand: z.object({
+    type: z.literal("UPDATE_SUBJECT"),
+    correction: z.object({
+      macroDomain: z.enum(MACRO_DOMAINS),
+      subdomainPath: z.array(z.string().trim().min(1).max(80)).max(6).optional(),
+      secondaryDomains: z.array(z.enum(MACRO_DOMAINS)).max(8).optional(),
+    }),
+  }).optional(),
 });
 
 export const app = new Hono();

@@ -8,7 +8,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "web": "tsx src/web/server.ts",
-    "test": "node --import tsx --test src/agent/loop.test.ts src/tutor/orchestrator.test.ts src/tools/weixin-article.test.ts src/rag/embedder.test.ts",
+    "test": "node --import tsx --test src/agent/loop.test.ts src/tutor/domain/catalog.test.ts src/tutor/routing/turn-resolver.test.ts src/tutor/store.test.ts src/tutor/orchestrator.test.ts src/tools/weixin-article.test.ts src/rag/embedder.test.ts",
     "init": "tsx src/index.ts init",
     "continue": "tsx src/index.ts --continue",
     "trace:inspect": "tsx src/trace/inspect.ts"

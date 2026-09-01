@@ -124,6 +124,8 @@ test("routes systematic learning requests for any topic into the same tutor", ()
   assert.equal(tutor.isTutorIntent("我想学英语"), true);
   assert.equal(tutor.isTutorIntent("我想学习写作"), true);
   assert.equal(tutor.isTutorIntent("今天天气怎么样"), false);
+  assert.equal(tutor.isTutorIntent("帮我查一下天气"), false);
+  assert.equal(tutor.isTutorIntent("我想知道现在几点"), false);
   assert.equal(tutor.isTutorIntent("我想学习 Vibe Coding"), true);
   assert.equal(tutor.isTutorIntent("https://mp.weixin.qq.com/s/abcd1234"), true);
   assert.equal(tutor.isTutorIntent("给我讲下这篇文章\n\n微信公众号文章：https://mp.weixin.qq.com/s/abcd1234"), true);
@@ -649,11 +651,59 @@ test("runs the diagnostic journey and persists resumable state", async () => {
     }
 
     const state = JSON.parse(await readFile(join(root, "sessions", "test-session.json"), "utf8")) as { schemaVersion: number; phase: string; currentCard: number; learnerProfile: string[] };
-    assert.equal(state.schemaVersion, 4);
+    assert.equal(state.schemaVersion, 5);
     assert.equal(state.phase, "teach");
     assert.equal(state.currentCard, 3);
     assert.ok(state.learnerProfile.some((item) => item.includes("没有自己实践过")));
     assert.match(await readFile(join(root, "events", "test-session.jsonl"), "utf8"), /state\.saved/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("updates subject classification without rebuilding route or learning evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-subject-correction-"));
+  try {
+    const store = new TutorStore(root);
+    const tutor = new TutorOrchestrator(store, fakeModelClient(), async () => "没有找到相关结果");
+    await tutor.run("subject-session", "我想系统学习写作", () => {});
+
+    const before = await store.load("subject-session");
+    assert.ok(before?.topicModel);
+    before.nodeLearningStates["concept-1"] = {
+      nodeId: "concept-1",
+      stage: "elicit",
+      evidence: [{ learnerQuote: "我能识别关键条件", criterion: "accurate", strength: "sufficient" }],
+      misconceptions: [],
+      questionsAsked: [],
+    };
+    await store.save(before, { type: "test.evidence.seeded" });
+    const routeBefore = before.topicModel.conceptRoute.map(({ id, title, target }) => ({ id, title, target }));
+
+    const clientCommand = {
+      type: "UPDATE_SUBJECT" as const,
+      correction: { macroDomain: "language-and-communication" as const, subdomainPath: ["中文写作"] },
+    };
+    const resolution = await tutor.resolveTurn("subject-session", "把学科改成中文写作", { clientCommand });
+    assert.equal(resolution.sessionCommand, "MODIFY");
+    assert.deepEqual(resolution.reasonCodes, ["structured-subject-correction"]);
+
+    const events: TutorEvent[] = [];
+    await tutor.run("subject-session", "把学科改成中文写作", (event) => { events.push(event); }, undefined, {
+      clientCommand,
+      turnResolution: resolution,
+    });
+
+    const after = await store.load("subject-session");
+    assert.equal(after?.topicModel?.id, before.topicModel.id);
+    assert.deepEqual(after?.topicModel?.conceptRoute.map(({ id, title, target }) => ({ id, title, target })), routeBefore);
+    assert.deepEqual(after?.nodeLearningStates["concept-1"].evidence, before.nodeLearningStates["concept-1"].evidence);
+    assert.equal(after?.topicModel?.subjectClassification?.macroDomain, "language-and-communication");
+    assert.equal(after?.topicModel?.subjectClassification?.source, "user-corrected");
+    assert.deepEqual(after?.topicModel?.subjectClassification?.subdomainPath, ["中文写作"]);
+    assert.ok(events.some((event) => event.type === "subject.classification.updated"));
+    assert.equal(events.some((event) => event.type === "topic.model.ready"), false);
+    assert.match(await readFile(join(root, "events", "subject-session.jsonl"), "utf8"), /subject\.classification\.updated/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -881,22 +931,147 @@ test("any topic uses the same dynamic diagnostic protocol", async () => {
   }
 });
 
-test("mid-session message does not rebuild topic model", async () => {
+test("mid-session learning goal creates a new selected learning session", async () => {
   const root = await mkdtemp(join(tmpdir(), "walry-switch-test-"));
   try {
-    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
+    const store = new TutorStore(root);
+    const client = fakeModelClient();
+    client.buildTopicModel = async ({ userGoal }) => ({
+      ...fakeTopicModel(),
+      id: `topic-${userGoal}`,
+      topic: userGoal,
+      lessonTitle: `${userGoal}课程`,
+    });
+    const tutor = new TutorOrchestrator(store, client, async () => "没有找到相关结果");
     const events: TutorEvent[] = [];
     const emit = (event: TutorEvent): void => { events.push(event); };
 
     await tutor.run("switch-session", "我想学习 Vibe Coding", emit);
+    const before = await store.load("switch-session");
     events.length = 0;
     await tutor.run("switch-session", "我想学习写作", emit);
 
-    // Should NOT rebuild topic model — stays in current diagnose flow
-    const model = events.find((event) => event.type === "topic.model.ready");
-    assert.equal(model, undefined);
-    // Should advance diagnostic card instead
+    const selected = await store.load("switch-session");
+    const previous = await store.load("switch-session", before!.learningSessionId);
+    assert.notEqual(selected?.learningSessionId, before?.learningSessionId);
+    assert.equal(selected?.topic, "写作");
+    assert.equal(selected?.sessionStatus, "active");
+    assert.equal(previous?.topic, "我想学习 Vibe Coding");
+    assert.equal(previous?.sessionStatus, "paused");
+    assert.ok(events.some((event) => event.type === "topic.model.ready" && event.topic === "写作"));
     assert.ok(events.some((event) => event.type === "diagnostic.card.ready"));
+    assert.deepEqual((await store.list("switch-session")).map((item) => item.status), ["paused", "active"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("topic switch pauses the old course and emits auditable session events", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-resolved-switch-test-"));
+  try {
+    const store = new TutorStore(root);
+    const tutor = new TutorOrchestrator(store, fakeModelClient(), async () => "没有找到相关结果");
+    await tutor.run("resolved-switch-session", "我想学习 Vibe Coding", () => {});
+    const before = await store.load("resolved-switch-session");
+    const events: TutorEvent[] = [];
+
+    await tutor.run("resolved-switch-session", "这门先放一下，我想改学写作", (event) => { events.push(event); });
+
+    const previous = await store.load("resolved-switch-session", before!.learningSessionId);
+    const selected = await store.load("resolved-switch-session");
+    assert.equal(previous?.currentCard, before?.currentCard);
+    assert.equal(previous?.topicModel?.id, before?.topicModel?.id);
+    assert.equal(previous?.sessionStatus, "paused");
+    assert.notEqual(selected?.learningSessionId, before?.learningSessionId);
+    assert.ok(events.some((event) => event.type === "learning.session.paused" && event.learningSessionId === before?.learningSessionId));
+    assert.ok(events.some((event) => event.type === "learning.session.switched" && event.toLearningSessionId === selected?.learningSessionId));
+    assert.ok(events.some((event) => event.type === "learning.session.created" && event.learningSessionId === selected?.learningSessionId));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a paused course can be resumed by learningSessionId without changing another course", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-resume-session-test-"));
+  try {
+    const store = new TutorStore(root);
+    const tutor = new TutorOrchestrator(store, fakeModelClient(), async () => "没有找到相关结果");
+    await tutor.run("resume-conversation", "我想学习 Vibe Coding", () => {});
+    const first = await store.load("resume-conversation");
+    await tutor.run("resume-conversation", "我想学习写作", () => {});
+    const second = await store.load("resume-conversation");
+    const events: TutorEvent[] = [];
+
+    await tutor.run(
+      "resume-conversation",
+      "继续学习",
+      (event) => { events.push(event); },
+      undefined,
+      { learningSessionId: first!.learningSessionId },
+    );
+
+    const selected = await store.load("resume-conversation");
+    const resumed = await store.load("resume-conversation", first!.learningSessionId);
+    const paused = await store.load("resume-conversation", second!.learningSessionId);
+    assert.equal(selected?.learningSessionId, first?.learningSessionId);
+    assert.equal(resumed?.sessionStatus, "active");
+    assert.equal(paused?.sessionStatus, "paused");
+    assert.ok(events.some((event) => event.type === "learning.session.switched" && event.toLearningSessionId === first?.learningSessionId));
+    assert.ok(events.some((event) => event.type === "learning.session.resumed" && event.learningSessionId === first?.learningSessionId));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit example request changes the teaching action without adding mastery evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-example-command-test-"));
+  try {
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
+    await tutor.run("example-command-session", "我想学习一个全新的对象", () => {});
+    await tutor.run("example-command-session", "完成诊断", () => {}, undefined, { diagnosticAnswers: protocolAnswers() });
+    const before = JSON.parse(await readFile(join(root, "sessions", "example-command-session.json"), "utf8")) as TutorState;
+    const beforeEvidence = before.nodeLearningStates["concept-1"]?.evidence.length ?? 0;
+
+    await tutor.run("example-command-session", "换个工作里的例子", () => {});
+
+    const after = JSON.parse(await readFile(join(root, "sessions", "example-command-session.json"), "utf8")) as TutorState;
+    assert.equal(after.lastDecision?.nextAction, "give-example");
+    assert.equal(after.nodeLearningStates["concept-1"]?.evidence.length ?? 0, beforeEvidence);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit explanation request does not create mastery evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-explain-command-test-"));
+  try {
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
+    await tutor.run("explain-command-session", "我想学习一个全新的对象", () => {});
+    await tutor.run("explain-command-session", "完成诊断", () => {}, undefined, { diagnosticAnswers: protocolAnswers() });
+
+    await tutor.run("explain-command-session", "别反问了，直接给我讲清楚", () => {});
+
+    const state = JSON.parse(await readFile(join(root, "sessions", "explain-command-session.json"), "utf8")) as TutorState;
+    assert.equal(state.lastDecision?.nextAction, "explain");
+    assert.deepEqual(state.lastDecision?.assessment.evidence, []);
+    assert.deepEqual(state.nodeLearningStates["concept-1"]?.evidence ?? [], []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resolving a side question does not mutate the active tutor state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-side-question-test-"));
+  try {
+    const tutor = new TutorOrchestrator(new TutorStore(root), fakeModelClient(), async () => "没有找到相关结果");
+    await tutor.run("side-question-session", "我想学习一个全新的对象", () => {});
+    const before = await readFile(join(root, "sessions", "side-question-session.json"), "utf8");
+
+    const resolution = await tutor.resolveTurn("side-question-session", "顺便问一下，今天天气怎么样？");
+
+    const after = await readFile(join(root, "sessions", "side-question-session.json"), "utf8");
+    assert.equal(resolution.target, "generic");
+    assert.equal(after, before);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

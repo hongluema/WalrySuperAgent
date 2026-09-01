@@ -4,6 +4,8 @@ import type { ModelMessage } from "ai";
 import { withAgentRules } from "../agent-md.js";
 import type { TopicModel, TutorAnswerEvaluation, TutorDiagnosis, TutorTurnDecision, TutorState } from "./types.js";
 import { isGenericRouteTitle } from "./topic-model.js";
+import type { SemanticTurnCandidate, TurnRoutingInput } from "./routing/turn-resolver.js";
+import { isKnowledgeType, isMacroDomain, KNOWLEDGE_TYPES, MACRO_DOMAINS, SUBJECT_CLASSIFIER_VERSION } from "./domain/catalog.js";
 
 const capabilityPlanSchema = z.object({
   acquisition: z.array(z.string()),
@@ -51,6 +53,23 @@ const answerEvaluationSchema = z.object({
   })).max(5),
 });
 
+const semanticTurnSchema = z.object({
+  target: z.enum(["tutor", "generic"]),
+  primaryIntent: z.enum([
+    "START_LEARNING", "ASK_QUESTION", "REQUEST_EXPLANATION", "REQUEST_EXAMPLE", "REQUEST_HINT",
+    "REQUEST_PRACTICE", "REQUEST_ASSESSMENT", "SUBMIT_ANSWER", "REPORT_CONFUSION",
+    "CHALLENGE_FEEDBACK", "CHANGE_GOAL", "PAUSE", "RESUME", "STOP",
+  ]),
+  sessionCommand: z.enum(["NONE", "CREATE", "CONTINUE", "MODIFY", "SWITCH", "PAUSE", "RESUME", "END"]),
+  requestedTopic: z.string().optional(),
+  explicitAction: z.enum([
+    "CLARIFY_GOAL", "BUILD_PLAN", "DIAGNOSE", "EXPLAIN", "DEMONSTRATE", "GUIDED_PRACTICE",
+    "INDEPENDENT_PRACTICE", "GIVE_HINT", "ASSESS", "REPAIR", "REVIEW", "TRANSFER", "COMPLETE",
+  ]).optional(),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1),
+});
+
 const diagnosticOptionSchema = z.object({ id: z.string(), label: z.string() });
 const diagnosticDimensionSchema = z.object({
   id: z.string(),
@@ -78,6 +97,8 @@ const topicModelSchema = z.object({
     target: z.string(),
     openingQuestion: z.string().min(4),
     openingHint: z.string().min(4),
+    knowledgeTypes: z.array(z.enum(KNOWLEDGE_TYPES)).min(1).max(4).optional(),
+    requiredCapabilities: z.array(z.string()).optional(),
   })).min(2).max(10),
   boundaryCases: z.array(z.string()).max(8).default([]),
   practiceTarget: z.string(),
@@ -98,6 +119,14 @@ const topicModelSchema = z.object({
     limitations: z.array(z.string()),
   }),
   capabilities: capabilityPlanSchema,
+  subjectClassification: z.object({
+    macroDomain: z.enum(MACRO_DOMAINS),
+    subdomainPath: z.array(z.string()),
+    secondaryDomains: z.array(z.enum(MACRO_DOMAINS)),
+    confidence: z.number().min(0).max(1),
+    source: z.enum(["inferred", "user-corrected"]),
+    version: z.string(),
+  }).optional(),
 }).superRefine((model, context) => {
   model.conceptRoute.forEach((node, index) => {
     if (isGenericRouteTitle(node.title)) {
@@ -129,6 +158,7 @@ const diagnosisSchema = z.object({
 });
 
 export type TutorModelClient = {
+  classifyTurn?(input: TurnRoutingInput, signal?: AbortSignal): Promise<SemanticTurnCandidate>;
   buildTopicModel(input: {
     userGoal: string;
     history: ModelMessage[];
@@ -164,6 +194,9 @@ function formatTopicContext(model: TopicModel): string {
     subject: model.subject,
     grounding: model.grounding,
     capabilities: model.capabilities,
+    subjectClassification: model.subjectClassification,
+    domainPackIds: model.domainPackIds,
+    domainCatalogVersion: model.domainCatalogVersion,
   });
 }
 
@@ -177,11 +210,12 @@ function extractJson(text: string): string {
 
 const topicModelContract = {
   requiredFields: ["id", "topic", "lessonTitle", "coreOutcome", "backgroundBrief", "conceptRoute", "boundaryCases", "practiceTarget", "rubricAnchors", "evidenceSources", "confidence", "subject", "grounding", "capabilities"],
-  conceptRouteFields: ["id", "title", "target", "openingQuestion", "openingHint"],
+  conceptRouteFields: ["id", "title", "target", "openingQuestion", "openingHint", "knowledgeTypes?"],
   rubricFields: ["conceptId", "accuracy", "explanation", "discrimination", "transfer", "performance?"],
   subjectFields: ["kind", "description", "userGoal"],
   groundingFields: ["mode", "sources: { label, verified }[]", "limitations"],
   capabilityFields: ["acquisition", "structuring", "interaction", "assessment", "missing"],
+  optionalSubjectClassificationFields: ["macroDomain", "subdomainPath", "secondaryDomains", "confidence", "source", "version"],
 };
 
 const answerEvaluationContract = {
@@ -468,6 +502,12 @@ export function normalizeTopicModel(value: unknown): unknown {
         ?? `如果把“${textValue(item?.title) ?? textValue(item?.name) ?? "这个知识点"}”放进一个具体场景，你会先关注什么？`,
       openingHint: textValue(item?.openingHint) ?? textValue(item?.questionHint)
         ?? `先从“${textValue(item?.target) ?? textValue(item?.description) ?? "这个知识点的核心内容"}”中找一个会影响判断的条件`,
+      knowledgeTypes: Array.isArray(item?.knowledgeTypes)
+        ? item.knowledgeTypes.filter(isKnowledgeType)
+        : undefined,
+      requiredCapabilities: Array.isArray(item?.requiredCapabilities)
+        ? item.requiredCapabilities.map(String).filter(Boolean)
+        : undefined,
     })) : route,
     boundaryCases: Array.isArray(boundaryCases) ? boundaryCases.map((item: any) => textValue(item) ?? [textValue(item?.title), textValue(item?.description)].filter(Boolean).join("：")) : boundaryCases,
     practiceTarget: textValue(source.practiceTarget) ?? textValue(source.practiceTask) ?? textValue(source.practice) ?? textValue(source.project),
@@ -500,6 +540,16 @@ export function normalizeTopicModel(value: unknown): unknown {
       assessment: Array.isArray(source.capabilities?.assessment) ? source.capabilities.assessment.map(String) : ["explanation", "transfer"],
       missing: Array.isArray(source.capabilities?.missing) ? source.capabilities.missing.map(String) : [],
     },
+    subjectClassification: isMacroDomain(source.subjectClassification?.macroDomain)
+      ? {
+          macroDomain: source.subjectClassification.macroDomain,
+          subdomainPath: Array.isArray(source.subjectClassification.subdomainPath) ? source.subjectClassification.subdomainPath.map(String).filter(Boolean) : [],
+          secondaryDomains: Array.isArray(source.subjectClassification.secondaryDomains) ? source.subjectClassification.secondaryDomains.filter(isMacroDomain) : [],
+          confidence: typeof source.subjectClassification.confidence === "number" ? source.subjectClassification.confidence : 0.7,
+          source: "inferred",
+          version: SUBJECT_CLASSIFIER_VERSION,
+        }
+      : undefined,
   };
 }
 
@@ -546,6 +596,25 @@ async function generateJson<T>(input: {
 export class AiTutorModelClient implements TutorModelClient {
   constructor(private readonly model: any) {}
 
+  async classifyTurn(input: TurnRoutingInput, signal?: AbortSignal): Promise<SemanticTurnCandidate> {
+    return generateJson({
+      model: this.model,
+      schema: semanticTurnSchema,
+      signal,
+      system: [
+        "你是私教系统的本轮语义分类器，只提供候选信号，不决定掌握状态，也不生成回答。",
+        "区分三件事：用户本轮意图、学习会话命令、显式教学动作。不要把它们合并成一个标签。",
+        "有活动课程时，普通回答、追问、不懂、要例子、要提示仍属于 tutor/CONTINUE。",
+        "只有用户明确开启另一个不相关学习对象才是 SWITCH；修改当前目标或侧重点是 MODIFY。",
+        "与课程无关的事实快问才是 generic/NONE，不得因为活动课程存在就强行归入课程。",
+        "‘帮我学 X’默认是 tutor/CREATE/START_LEARNING，而不是一次性快问。",
+        "requestedTopic 只在 CREATE、SWITCH 或 MODIFY 且原话明确时填写。confidence 表示分类置信度。",
+        "只输出合法 JSON。",
+      ].join("\n"),
+      prompt: JSON.stringify(input),
+    });
+  }
+
   async buildTopicModel(input: { userGoal: string; history: ModelMessage[]; materials?: string[] }, signal?: AbortSignal): Promise<TopicModel> {
     const model = await generateJson({
       model: this.model,
@@ -556,7 +625,8 @@ export class AiTutorModelClient implements TutorModelClient {
       system: [
         "你是一位优秀、专业、会因材施教的一对一私教老师，同时负责课程设计。",
         "你不能依赖预设主题列表，必须为任意用户主题动态建立 TopicModel。",
-        "不要把学习对象归入封闭类型枚举；subject.kind 是开放标签。请按知识取得、内容组织、教学互动、掌握验证四组能力描述任务。",
+        "subject.kind 仍是开放标签；同时使用 subjectClassification.macroDomain 做九大类粗分类，并给每个 conceptRoute 节点标注 1-3 个 knowledgeTypes。粗分类只提供默认约束，不能替代具体课程路线。",
+        `macroDomain 只能是：${MACRO_DOMAINS.join("、")}。knowledgeTypes 只能是：${KNOWLEDGE_TYPES.join("、")}。subjectClassification.source 固定为 inferred，version 固定为 ${SUBJECT_CLASSIFIER_VERSION}。`,
         "忠于用户原始学习对象和目标，不得擅自扩张成更大的领域课程、考试课或项目课。",
         "只有真实提供或检索到的来源 verified 才能为 true；模型已有知识不是已验证研究。",
         "materials 非空时，它们是真实取得的搜索结果或用户材料。课程背景、核心内容、路线和例子必须优先以 materials 为依据，不得只凭模型记忆另起一套内容。",

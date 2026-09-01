@@ -1,5 +1,8 @@
 import type { TopicModel } from "./types.js";
 import { extractWeixinUrls } from "../tools/weixin-article.js";
+import { DomainCatalog } from "./domain/catalog.js";
+
+const domainCatalog = new DomainCatalog();
 
 function option(id: string, label: string) {
   return { id, label };
@@ -146,7 +149,7 @@ export function ensureTopicModelDefaults(model: TopicModel): TopicModel {
     explanation: rubric.explanation ?? "能说明关键结论为什么成立",
     discrimination: rubric.discrimination ?? "能区分相近概念和常见误解",
   }));
-  return model;
+  return domainCatalog.enrich(model);
 }
 
 /**
@@ -154,7 +157,7 @@ export function ensureTopicModelDefaults(model: TopicModel): TopicModel {
  * 主题内容必须由模型根据用户目标和证据动态生成。
  */
 export function isSystematicLearningIntent(message: string): boolean {
-  return /(我想|想要|希望|带我|教我|学习|学会|掌握|练习|复习|系统了解|深入了解|怎么学|如何学|应该怎么做|讲下这|讲讲这|分析这|解读这)/u.test(message)
+  return /(?:(?:我想|想要|希望|帮我|带我|教我)(?:学|学习|学会|掌握|练习|复习|了解|讲|分析|解读)|学习|学会|掌握|练习|复习|系统了解|深入了解|怎么学|如何学|如何进行|应该怎么做|讲下这|讲讲这|分析这|解读这)/u.test(message)
     || extractWeixinUrls(message).length > 0;
 }
 
