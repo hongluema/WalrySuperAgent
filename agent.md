@@ -30,3 +30,11 @@
 - 教学必须按诊断后的 startingPoint、emphasis、exampleContext、pacing 因材施教
 
 ## 错题本
+
+## TODO
+
+- [ ] **生产环境启用 HTTPS（替代 HTTP + IP 访问）**  
+  现象：服务器上点击发送报 `crypto.randomUUID is not a function`，本地 `localhost` 正常。  
+  根因：`crypto.randomUUID()` 仅在 Secure Context 可用（HTTPS / localhost）；当前 nginx 只监听 80/8080，通过 `http://124.221.211.24` 访问时浏览器不提供该方法。  
+  临时方案（已做）：前端 `createId()` fallback——优先 `randomUUID`，否则 `getRandomValues`，最后 `Math.random`。  
+  后续改进：为域名配置 SSL（如 Let's Encrypt），全站走 HTTPS。
