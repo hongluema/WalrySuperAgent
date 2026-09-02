@@ -17,7 +17,7 @@
     "feishu": {
       "enabled": true,
       "appId": "cli_aae1be465038dbc0",
-      "appSecret": "bLXnJ3mx04aMgzm3dR3JwfzBtA7RDDp7",
+      "appSecret": "${FEISHU_APP_SECRET}",
       "port": 3000
     }
   },
