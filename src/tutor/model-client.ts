@@ -7,6 +7,9 @@ import { isGenericRouteTitle } from "./topic-model.js";
 import type { SemanticTurnCandidate, TurnRoutingInput } from "./routing/turn-resolver.js";
 import { isKnowledgeType, isMacroDomain, KNOWLEDGE_TYPES, MACRO_DOMAINS, SUBJECT_CLASSIFIER_VERSION } from "./domain/catalog.js";
 
+import { OBSTACLE_KINDS, usesWebTeaching, domainTeachingGuidance } from "./web-teaching.js";
+import { resolveMasteryPolicy } from "./domain/catalog.js";
+
 const capabilityPlanSchema = z.object({
   acquisition: z.array(z.string()),
   structuring: z.array(z.string()),
@@ -51,6 +54,16 @@ const answerEvaluationSchema = z.object({
     text: z.string(),
     thinkingHint: z.string().min(4),
   })).max(5),
+});
+
+export const webAnswerEvaluationSchema = answerEvaluationSchema.extend({
+  obstacle: z.object({ kind: z.enum(OBSTACLE_KINDS), description: z.string(), learnerQuote: z.string() }),
+  questionCandidates: z.array(z.object({
+    purpose: z.enum(["accurate", "explained", "discrimination", "transfer", "performance", "introduce", "doubt-check", "clarify"]),
+    text: z.string().trim().min(4),
+    thinkingHint: z.string().trim().min(4),
+    expectedSignals: z.array(z.string().trim().min(1)).min(1).max(5),
+  })).min(1).max(6),
 });
 
 const semanticTurnSchema = z.object({
@@ -432,6 +445,7 @@ export function normalizeEvaluation(value: unknown): unknown {
       purpose: mapCriterion(item?.purpose) ?? item?.purpose,
       text: textValue(item?.text) ?? asString(item?.text),
       thinkingHint: textValue(item?.thinkingHint) || "从刚才的原话里找还没说清的一层",
+      expectedSignals: Array.isArray(item?.expectedSignals) ? asStringArray(item.expectedSignals) : undefined,
     })),
   };
 }
@@ -555,7 +569,7 @@ export function normalizeTopicModel(value: unknown): unknown {
 
 async function generateJson<T>(input: {
   model: any;
-  schema: z.ZodType<T>;
+  schema: z.ZodType<T, z.ZodTypeDef, any>;
   system: string;
   prompt: string;
   contract?: unknown;
@@ -725,11 +739,11 @@ export class AiTutorModelClient implements TutorModelClient {
     const lastQuestion = nodeState?.questionsAsked.at(-1) || lastAssistantMessage?.content || "";
     const timeoutSignal = AbortSignal.timeout(180_000);
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    return generateJson({
+    return generateJson<TutorAnswerEvaluation>({
       model: this.model,
-      schema: answerEvaluationSchema,
+      schema: usesWebTeaching(input.state) ? webAnswerEvaluationSchema : answerEvaluationSchema,
       signal: abortSignal,
-      contract: answerEvaluationContract,
+      contract: usesWebTeaching(input.state) ? { ...answerEvaluationContract, obstacle: { kind: OBSTACLE_KINDS, description: "具体缺口", learnerQuote: "学生原话" }, questionCandidateFields: ["purpose: accurate|explained|discrimination|transfer|performance|introduce|doubt-check|clarify", "text", "thinkingHint", "expectedSignals: string[]"] } : answerEvaluationContract,
       normalize: normalizeEvaluation,
       system: [
         "你是答案证据评估器，不负责决定教学阶段，不负责直接教学，也不能标记节点完成。",
@@ -743,13 +757,27 @@ export class AiTutorModelClient implements TutorModelClient {
         "misconceptionUpdates 中，open 记录新误区；repaired 只能复制 currentMisconceptions 中已有 description，并由本轮原话明确证明已修复。",
         "questionCandidates 只是候选探针，不得决定 nextAction。每个候选必须绑定一个 purpose，并来自当前节点。",
         "每个 questionCandidate 必须提供 thinkingHint，只提示思考方向、比较维度或可回忆的经历，不能泄露答案。",
-        "禁止摘要题：最关键的区别、机制或作用是什么。禁止再用一句话说明。禁止同义反复上一问。",
+        ...(usesWebTeaching(input.state) ? [
+          "Web 教师策略：先判一个主要障碍 obstacle，再给有区分度的候选问题。kind=none 代表没有具体错误但可能还缺证据；仅当真需澄清未知时用 uncertain。description 写具体问题，learnerQuote 引用原话；不要把未答题或不同观点直接判误区。",
+          "依次排除题意含混、陌生术语、前置不足、表示困难、操作失误，再判断概念/因果误区。连续无新证据时换表示或给最小示范，不同义重问。",
+          "questionCandidates 必须包含 remainingCriteria 中本轮作答之后仍缺的第一个维度的全新任务；概念/因果误区额外提供 discrimination，题意不清额外提供 clarify。每个问题提供 expectedSignals（内部合格信号），题面不能泄露这些信号。",
+          "原话回答正确可以 obstacle=none，即使提示下完成也要继续生成同一未掌握维度的全新独立题，以便撤除帮助。",
+          "缺事实和前置时给可作答的小任务，机制解释和必要事实提取允许使用；不按禁用词机械排除有价值的问题。",
+          "activeQuestion.support 表示当前题受助情况；有提示/示范时证据最多 weak。performance 不得仅凭口头声称标 sufficient，不虚构运行或现场表现。",
+          ...domainTeachingGuidance(input.topicModel, input.state.activeConcept),
+        ] : ["禁止摘要题：最关键的区别、机制或作用是什么。禁止再用一句话说明。禁止同义反复上一问。"]),
         `必须严格返回：${JSON.stringify(answerEvaluationContract)}`,
       ].join("\n"),
       prompt: JSON.stringify({
         userMessage: input.message,
         lastAssistantMessage: lastAssistantMessage?.content ?? "",
         lastQuestion,
+        ...(usesWebTeaching(input.state) ? {
+          activeQuestion: nodeState?.activeQuestion,
+          lastObstacle: nodeState?.lastObstacle,
+          stalledTurns: nodeState?.stalledTurns ?? 0,
+          remainingCriteria: resolveMasteryPolicy(input.topicModel, input.state.activeConcept).requiredCriteria.filter((criterion) => !nodeState?.evidence.some((item) => item.criterion === criterion && item.strength === "sufficient")),
+        } : {}),
         questionsAsked: nodeState?.questionsAsked ?? [],
         activeConcept,
         activeRubric,
@@ -808,7 +836,17 @@ export class AiTutorModelClient implements TutorModelClient {
       model: this.model,
       abortSignal,
       maxRetries: 1,
-      system: withAgentRules([
+      system: withAgentRules((usesWebTeaching(input.state) ? [
+        "你是一对一苏格拉底私教，依据本轮原话与教学动作提供简洁反馈，只推进当前一个认知目标。",
+        "本次 Web 用单独的题卡展示唯一问题和折叠提示：正文只输出反馈与必要支架，不重复题干、不追加提问、不输出括号思路、不展示内部标签或评分。题卡负责保留苏格拉底式提问。",
+        "先具体回应已证明部分，再针对 responsePlan.goal 处理一个障碍。没有证据不要泛泛夸奖，不重复学习者背景。",
+        "严格根据 decision.webTeaching.question.support 提供帮助：none 时只反馈上一题，不讲解新题答案/关键解法/同构示范；hint 时提供一个最小线索；worked-example 时示范一个步骤，让学生完成剩余判断。",
+        "题目 expectedSignals 是内部判定标准，禁止向学生泄露。若题目 purpose=clarify，只澄清，不把它当考核。",
+        "不要为了短而跳过学生无法自行推导的事实；首次 introduce 可给必要背景，后续独立题前不再提示答案。",
+        "teachingApproach 决定例子、起点与节奏；学生质疑先核对事实，允许合理不同答案。",
+        "complete 或暂停时只收束；不得继续出题。",
+        ...domainTeachingGuidance(input.topicModel, input.state.activeConcept),
+      ] : [
         "你是一对一私教。根据教学诊断开口，不要暴露隐藏推理过程。",
         "teachingApproach 是诊断后形成的因材施教约束：必须从 startingPoint 开始，优先覆盖 emphasis，例子贴近 exampleContext，并按 pacing 控制深浅；不能生成了画像却仍按通用模板教学。",
         "结构：先回应对话中的原话（肯定 hit；把 unpunched 打透；invented 非空就当场叫停并纠正，那不是源材料里的东西），再只教 nextLayer / sourceMove 这一层，最后只问一个问题。讲解模式可以把当前节点讲透。只要仍处于 teach 阶段且不是 complete 或 switch-topic，教学会话不能讲完停住；讲解模式可以在讲清后停在确认句。",
@@ -823,7 +861,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "首次进入节点（questionsAsked 为空且 questionPurpose 为 introduce）：先把 keyPoints / target 里不可推导的事实讲清楚，再问对比题，不要问课堂摘要。",
         "严格执行 forbiddenContent。不得一次总结整门课程，不得提前教授后续节点。",
         "如果用户表示不知道，降低难度并给例子；如果用户反驳，先承认并澄清，不要强行评价。",
-      ].join("\n")),
+      ]).join("\n")),
       prompt: JSON.stringify({
         userMessage: input.message,
         phase: input.state.phase,

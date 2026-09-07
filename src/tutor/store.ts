@@ -26,6 +26,7 @@ function normalizeTutorState(value: TutorState, conversationId: string, legacyLe
   value.knownIntuitions ??= [];
   value.nodeLearningStates ??= {};
   value.sessionMode ??= "teach";
+  value.teachingPolicy ??= "legacy.v1";
   return value;
 }
 

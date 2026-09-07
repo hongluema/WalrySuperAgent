@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ClientTutorCommand, DiagnosticCard, TopicModel, TurnResolution, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
+import type { ClientTutorCommand, LearningSupportInput, TeachingPolicy, DiagnosticCard, TopicModel, TurnResolution, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
 import { TutorStore } from "./store.js";
 import type { TutorModelClient } from "./model-client.js";
@@ -9,6 +9,8 @@ import { pickSearchTool } from "../tools/web-search.js";
 import { truncateResult } from "../tools/registry.js";
 import { extractWeixinUrls, fetchWeixinArticle, stripWeixinUrls, type SourceArticle } from "../tools/weixin-article.js";
 import { DomainCatalog, MACRO_DOMAIN_LABELS, resolveMasteryPolicy } from "./domain/catalog.js";
+
+import { usesWebTeaching, WEB_TEACHING_POLICY, buildWebTeachingDecision, attachPlannedWebQuestion, recordWebQuestion } from "./web-teaching.js";
 
 const phaseLabels = {
   research: "正在建立学习对象与能力模型",
@@ -20,6 +22,8 @@ const phaseLabels = {
 };
 
 type RunOptions = {
+  teachingPolicy?: TeachingPolicy;
+  learningSupport?: LearningSupportInput;
   diagnosticAnswers?: Record<string, string>;
   sessionMode?: "teach" | "explain";
   learningSessionId?: string;
@@ -164,7 +168,7 @@ export class TutorOrchestrator {
     try {
       await emitThinking(emit, "正在根据你的回答做教学判断…");
       const evaluation = await this.modelClient!.evaluateAnswer({ message, state, topicModel }, signal);
-      const decision = buildEvidenceDrivenDecision({
+      const decision = usesWebTeaching(state) ? buildWebTeachingDecision({ model: topicModel, activeConcept: state.activeConcept, nodeState, evaluation, message }) : buildEvidenceDrivenDecision({
         model: topicModel,
         activeConcept: state.activeConcept,
         nodeState,
@@ -180,6 +184,11 @@ export class TutorOrchestrator {
       const fallback = buildFallbackTurnDecision(message, topicModel, state.activeConcept, nodeState?.questionsAsked ?? []);
       fallback.thinking = `教学评估失败：${reason}。带着原话继续教，不要求复述，也不推进掌握状态。`;
       await emit({ type: "reasoning.delta", text: fallback.thinking });
+      if (usesWebTeaching(state)) {
+        fallback.responsePlan.question = "刚才的教学判断没有完成，你愿意指出需要我先澄清的具体一步吗？";
+        fallback.pedagogy!.questionPurpose = "clarify";
+        attachPlannedWebQuestion(topicModel, state.activeConcept, nodeState, fallback);
+      }
       return fallback;
     }
   }
@@ -195,9 +204,13 @@ export class TutorOrchestrator {
 
     const runId = `run_${randomUUID().slice(0, 8)}`;
     let state = await this.store.load(conversationId, options.learningSessionId);
-    if (!state) state = emptyState(conversationId, options.learningSessionId);
+    if (!state) {
+      state = emptyState(conversationId, options.learningSessionId);
+      state.teachingPolicy = options.teachingPolicy === WEB_TEACHING_POLICY ? WEB_TEACHING_POLICY : "legacy.v1";
+    }
     else {
       state.schemaVersion = 5;
+      state.teachingPolicy ??= "legacy.v1";
       state.learnerProfile ??= [];
       state.knownIntuitions ??= [];
       state.nodeLearningStates ??= {};
@@ -248,6 +261,7 @@ export class TutorOrchestrator {
 
         state = emptyState(conversationId);
         state.sessionMode = "teach";
+        state.teachingPolicy = options.teachingPolicy === WEB_TEACHING_POLICY ? WEB_TEACHING_POLICY : "legacy.v1";
         await emit({
           type: "learning.session.switched",
           fromLearningSessionId: previousLearningSessionId,
@@ -258,6 +272,30 @@ export class TutorOrchestrator {
           learningSessionId: state.learningSessionId,
           topic: turnResolution.requestedTopic,
         });
+      }
+      await emit({ type: "teaching.policy.selected", policy: state.teachingPolicy ?? "legacy.v1" });
+      if (usesWebTeaching(state) && options.learningSupport && turnResolution.sessionCommand !== "SWITCH" && !options.clientCommand) {
+        const current = state.topicModel?.conceptRoute[state.activeConcept];
+        const node = current && state.nodeLearningStates[current.id];
+        const question = node?.activeQuestion;
+        if (!question || question.id !== options.learningSupport.questionId) {
+          throw new Error("题目已经更新，请刷新课堂后回答当前问题");
+        }
+        if (options.learningSupport.hintSeen && question.support === "none") {
+          question.support = "hint";
+          const savedQuestion = node?.questionHistory?.find((item) => item.id === question.id);
+          if (savedQuestion) savedQuestion.support = "hint";
+        }
+      }
+      if (usesWebTeaching(state) && !options.learningSupport && !options.clientCommand && turnResolution.sessionCommand === "CONTINUE") {
+        const current = state.topicModel?.conceptRoute[state.activeConcept];
+        const node = current && state.nodeLearningStates[current.id];
+        if (node?.activeQuestion?.support === "none") {
+          // Missing exposure metadata cannot establish an unassisted attempt.
+          node.activeQuestion.support = "hint";
+          const saved = node.questionHistory?.find((item) => item.id === node.activeQuestion!.id);
+          if (saved) saved.support = "hint";
+        }
       }
       state.messages.push({ role: "user", content: message });
       let topicModel = state.topicModel ? ensureTopicModelDefaults(state.topicModel) : undefined;
@@ -371,6 +409,7 @@ export class TutorOrchestrator {
             topicModel,
             state.sessionMode === "explain" ? "讲解模式：先讲核心知识，再结合例子讲清机制" : "用户要求直接讲解",
           );
+          if (usesWebTeaching(state)) attachPlannedWebQuestion(topicModel, state.activeConcept, undefined, decision);
           state.lastDecision = decision;
           this.applyStatePatch(state, topicModel, decision);
           if (state.sessionMode !== "explain") await emitRoadmap(state, emit);
@@ -401,7 +440,10 @@ export class TutorOrchestrator {
       if (!topicModel) throw new Error("当前会话缺少动态 TopicModel");
 
       const resolvedDecision = buildResolvedActionDecision(topicModel, state.activeConcept, turnResolution);
-      if (resolvedDecision) {
+      const useEvaluatedPractice = usesWebTeaching(state) && state.phase === "teach"
+        && ["GUIDED_PRACTICE", "ASSESS"].includes(turnResolution.explicitAction ?? "");
+      if (resolvedDecision && !useEvaluatedPractice) {
+        if (usesWebTeaching(state)) attachPlannedWebQuestion(topicModel, state.activeConcept, state.nodeLearningStates[topicModel.conceptRoute[state.activeConcept]?.id], resolvedDecision);
         state.turnCount += 1;
         if (turnResolution.sessionCommand === "PAUSE") state.sessionStatus = "paused";
         if (turnResolution.sessionCommand === "RESUME") state.sessionStatus = "active";
@@ -449,6 +491,7 @@ export class TutorOrchestrator {
         }, signal);
 
         const decision = buildFirstTeachingDecision(topicModel, diagnosis.summary, state.activeConcept);
+        if (usesWebTeaching(state)) attachPlannedWebQuestion(topicModel, state.activeConcept, undefined, decision);
         state.learnerProfile = diagnosis.learnerProfile;
         state.teachingApproach = diagnosis.teachingApproach;
         state.knownIntuitions = diagnosis.skipSuggestions ?? [];
@@ -488,7 +531,7 @@ export class TutorOrchestrator {
         scoredIndex >= 0 ? scoredIndex : taughtIndex,
         scoredNode ? state.nodeLearningStates[scoredNode.id] : undefined,
       );
-      await emit({ type: "assessment.updated", score: progress.score, status: progress.status });
+      await emit({ type: "assessment.updated", score: progress.score, status: progress.status, ...(decision.webTeaching ? { feedback: decision.webTeaching.feedback } : {}) });
       if (state.sessionMode !== "explain") await emitRoadmap(state, emit);
       const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
       this.recordQuestion(state, topicModel, decision, responseText);
@@ -514,7 +557,8 @@ export class TutorOrchestrator {
       };
       for (const evidence of decision.assessment.evidence) {
         const duplicate = nodeState.evidence.some((item) => (
-          item.learnerQuote === evidence.learnerQuote
+          item.questionId === evidence.questionId
+          && item.learnerQuote === evidence.learnerQuote
           && item.criterion === evidence.criterion
           && item.strength === evidence.strength
         ));
@@ -577,6 +621,11 @@ export class TutorOrchestrator {
   }
 
   private recordQuestion(state: TutorState, model: TopicModel, decision: TutorTurnDecision, responseText: string) {
+    if (usesWebTeaching(state) && !decision.webTeaching?.question) {
+      const current = model.conceptRoute[state.activeConcept];
+      if (current && state.nodeLearningStates[current.id]) state.nodeLearningStates[current.id].activeQuestion = undefined;
+      return;
+    }
     const question = decision.responsePlan.question
       || decision.pedagogy?.nextQuestion
       || responseText.match(/[^。！？\n]*(?:[？?])(?=\s*$)/u)?.[0]?.trim();
@@ -596,6 +645,7 @@ export class TutorOrchestrator {
       ? "accurate"
       : decision.pedagogy.questionPurpose;
     state.nodeLearningStates[current.id] = nodeState;
+    if (usesWebTeaching(state)) recordWebQuestion(state, decision);
   }
 
   private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
@@ -625,6 +675,7 @@ export class TutorOrchestrator {
     const asked = current ? state.nodeLearningStates[current.id]?.questionsAsked ?? [] : [];
     if (
       state.sessionMode !== "explain"
+      && !usesWebTeaching(state)
       && plannedQuestion
       && !cardShowsQuestion
       && !hasAskedQuestion(text, plannedQuestion)
@@ -648,6 +699,12 @@ export class TutorOrchestrator {
     if (state.phase === "complete") state.sessionStatus = "completed";
     await this.store.save(state, storeEvent);
     await emit({ type: "state.saved", phase: state.phase, activeConcept: state.activeConcept, learningSessionId: state.learningSessionId });
+    if (usesWebTeaching(state) && (state.phase === "teach" || state.phase === "complete")) {
+      const current = state.topicModel?.conceptRoute[state.activeConcept];
+      const question = current ? state.nodeLearningStates[current.id]?.activeQuestion : undefined;
+      // Publish only durable questions, so a failed save cannot leave an unanswerable card.
+      await emit({ type: "teaching.question.ready", question });
+    }
   }
 }
 

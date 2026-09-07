@@ -11,6 +11,8 @@ const runSchema = z.object({
   learningSessionId: z.string().trim().min(1).max(120).optional(),
   message: z.string().trim().min(1).max(20_000),
   diagnosticAnswers: z.record(z.string()).optional(),
+  teachingPolicy: z.enum(["legacy.v1", "web-teacher.v2"]).optional(),
+  learningSupport: z.object({ questionId: z.string().trim().min(1).max(120), hintSeen: z.boolean() }).optional(),
   sessionMode: z.enum(["teach", "explain"]).optional(),
   clientCommand: z.object({
     type: z.literal("UPDATE_SUBJECT"),

@@ -14,7 +14,7 @@ import type { SuperAgentConfig } from "../config/schema.js";
 import { calculatorTool, weatherTool } from "../tools/utility-tools.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { TutorOrchestrator } from "../tutor/orchestrator.js";
-import type { ClientTutorCommand, TutorEvent, VisibleReasoningTrace } from "../tutor/types.js";
+import type { ClientTutorCommand, LearningSupportInput, TeachingPolicy, TutorEvent, VisibleReasoningTrace } from "../tutor/types.js";
 import { LocalTraceRecorder } from "../trace/recorder.js";
 import { AiTutorModelClient } from "../tutor/model-client.js";
 
@@ -23,6 +23,8 @@ export interface WebAgentRunInput {
   learningSessionId?: string;
   message: string;
   diagnosticAnswers?: Record<string, string>;
+  teachingPolicy?: TeachingPolicy;
+  learningSupport?: LearningSupportInput;
   sessionMode?: "teach" | "explain";
   clientCommand?: ClientTutorCommand;
 }
@@ -150,6 +152,8 @@ export class WebAgentService {
           signal,
           {
             diagnosticAnswers: input.diagnosticAnswers,
+            teachingPolicy: input.teachingPolicy,
+            learningSupport: input.learningSupport,
             sessionMode: input.sessionMode,
             learningSessionId: input.learningSessionId,
             clientCommand: input.clientCommand,

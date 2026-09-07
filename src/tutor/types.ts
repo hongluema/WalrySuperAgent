@@ -150,6 +150,36 @@ export type LearningEvidence = {
   criterion: EvidenceCriterion;
   strength: "weak" | "sufficient";
   confidence?: number;
+  questionId?: string;
+  nodeId?: string;
+  support?: TeachingSupport;
+  verification?: "learner-response";
+};
+
+export type TeachingPolicy = "legacy.v1" | "web-teacher.v2";
+export type TeachingSupport = "none" | "hint" | "worked-example";
+export type LearningSupportInput = { questionId: string; hintSeen: boolean };
+export type LearningObstacle = {
+  kind: "none" | "missing-fact" | "prerequisite-gap" | "representation-gap" | "concept-boundary" | "causal-model" | "procedure-error" | "transfer-gap" | "evidence-gap" | "expression-gap" | "task-ambiguity" | "load-or-affect" | "uncertain";
+  description: string;
+  learnerQuote: string;
+};
+export type TeachingQuestion = {
+  id: string;
+  nodeId: string;
+  purpose: QuestionPurpose;
+  text: string;
+  thinkingHint: string;
+  support: TeachingSupport;
+  expectedSignals: string[];
+};
+export type TeachingFeedback = {
+  observed: string;
+  gap: string;
+  nextStep: string;
+  evidenceMode: "independent" | "assisted" | "none";
+  metCriteria: EvidenceCriterion[];
+  missingCriteria: EvidenceCriterion[];
 };
 
 export type MisconceptionUpdate = {
@@ -158,7 +188,7 @@ export type MisconceptionUpdate = {
   evidenceQuote: string;
 };
 
-export type QuestionPurpose = EvidenceCriterion | "introduce" | "doubt-check";
+export type QuestionPurpose = EvidenceCriterion | "introduce" | "doubt-check" | "clarify";
 
 export type DiagnosticKind = "baseline" | "motivation" | "focus" | "misconception" | "constraints";
 
@@ -166,9 +196,11 @@ export type QuestionCandidate = {
   purpose: QuestionPurpose;
   text: string;
   thinkingHint: string;
+  expectedSignals?: string[];
 };
 
 export type TutorAnswerEvaluation = {
+  obstacle?: LearningObstacle;
   intent: TutorTurnIntent;
   understoodMeaning: string;
   observations: Array<{ quote: string; implication: string }>;
@@ -207,6 +239,10 @@ export type NodeLearningState = {
   questionsAsked: string[];
   lastQuestionPurpose?: QuestionPurpose;
   hintLevel?: 0 | 1 | 2 | 3 | 4;
+  activeQuestion?: TeachingQuestion;
+  questionHistory?: TeachingQuestion[];
+  lastObstacle?: LearningObstacle;
+  stalledTurns?: number;
 };
 
 export type TopicModel = {
@@ -274,6 +310,7 @@ export type TutorDiagnosis = {
 };
 
 export type TutorTurnDecision = {
+  webTeaching?: { question?: TeachingQuestion; feedback: TeachingFeedback; obstacle?: LearningObstacle };
   intent: TutorTurnIntent;
   understoodMeaning: string;
   evidence: Array<{ quote: string; implication: string }>;
@@ -372,6 +409,7 @@ export type VisibleReasoningTrace = {
 };
 
 export type TutorState = {
+  teachingPolicy?: TeachingPolicy;
   schemaVersion: 1 | 2 | 3 | 4 | 5;
   conversationId: string;
   learningSessionId: string;
@@ -398,6 +436,8 @@ export type TutorState = {
 };
 
 export type TutorEvent =
+  | { type: "teaching.policy.selected"; policy: TeachingPolicy }
+  | { type: "teaching.question.ready"; question?: TeachingQuestion }
   | { type: "run.started"; runId: string; conversationId: string; learningSessionId?: string }
   | { type: "turn.intent.resolved"; resolution: TurnResolution }
   | { type: "learning.session.created"; learningSessionId: string; topic?: string }
@@ -418,7 +458,7 @@ export type TutorEvent =
   | { type: "roadmap.ready"; roadmap: RoadmapNode[] }
   | { type: "reasoning.delta"; text: string }
   | { type: "reasoning.trace.ready"; trace: VisibleReasoningTrace }
-  | { type: "assessment.updated"; score: number; status: "in-progress" | "mastered" }
+  | { type: "assessment.updated"; score: number; status: "in-progress" | "mastered"; feedback?: TeachingFeedback }
   | { type: "state.saved"; phase: TutorPhase; activeConcept: number; learningSessionId?: string }
   | { type: "message.delta"; text: string }
   | { type: "run.completed"; runId: string }
