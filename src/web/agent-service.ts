@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createOpenAI } from "@ai-sdk/openai";
-import type { ModelMessage } from "ai";
+import { streamText, type ModelMessage } from "ai";
 import { createMockModel } from "../mock-model.js";
 import { agentLoop, type AgentLoopEvent } from "../agent/loop.js";
 import {
@@ -253,4 +253,44 @@ export class WebAgentService {
       throw error;
     }
   }
+
+  async quickAsk(
+    input: {
+      message: string;
+      context?: {
+        topic?: string;
+        chapter?: string;
+        objective?: string;
+        recentDialogue?: string;
+      };
+    },
+    signal?: AbortSignal,
+    onChunk?: (chunk: string) => void | Promise<void>,
+  ): Promise<string> {
+    const systemPrompt = [
+      "你是 Cheerful AI 的快问答疑助手。",
+      "请用清晰、直接、精炼的语言解答学员的问题。",
+      "只回答核心要点和简明解释，切中肯綮，不要启动私教摸底或分步设问，也不要给出冗长无关的推导。",
+      input.context
+        ? `\n【当前课堂关卡上下文】：\n主题：${input.context.topic ?? "未知"}\n关卡：${input.context.chapter ?? "未知"}${input.context.objective ? `\n目标：${input.context.objective}` : ""}${input.context.recentDialogue ? `\n最近摘要：${input.context.recentDialogue}` : ""}`
+        : "",
+    ].filter(Boolean).join("\n");
+
+    const result = streamText({
+      model: this.model,
+      system: systemPrompt,
+      prompt: input.message,
+      abortSignal: signal,
+    });
+
+    let fullText = "";
+    for await (const chunk of result.textStream) {
+      fullText += chunk;
+      if (onChunk) {
+        await onChunk(chunk);
+      }
+    }
+    return fullText;
+  }
 }
+

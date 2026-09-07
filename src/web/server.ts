@@ -22,12 +22,96 @@ const runSchema = z.object({
   }).optional(),
 });
 
+const quickAskSchema = z.object({
+  message: z.string().trim().min(1).max(10_000),
+  context: z.object({
+    topic: z.string().trim().optional(),
+    chapter: z.string().trim().optional(),
+    objective: z.string().trim().optional(),
+    recentDialogue: z.string().trim().optional(),
+  }).optional(),
+});
+
 export const app = new Hono();
 const agent = new WebAgentService();
 
 app.get("/health", (context) =>
   context.json({ status: "ok", service: "walry-web-agent" }),
 );
+
+app.post("/api/v1/quick-ask", async (context) => {
+  let body: unknown;
+  try {
+    body = await context.req.json();
+  } catch {
+    return context.json(
+      { error: { code: "INVALID_REQUEST", message: "请求体必须是 JSON" } },
+      400,
+    );
+  }
+
+  const parsed = quickAskSchema.safeParse(body);
+  if (!parsed.success) {
+    return context.json(
+      { error: { code: "INVALID_REQUEST", message: "message 不合法" } },
+      400,
+    );
+  }
+
+  const encoder = new TextEncoder();
+  let closed = false;
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (event: unknown) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
+        }
+      };
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+
+      void agent
+        .quickAsk(
+          parsed.data,
+          context.req.raw.signal,
+          (chunk) => {
+            send({ type: "chunk", delta: chunk });
+          },
+        )
+        .then(() => {
+          send({ type: "done" });
+          finish();
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : "快问运行失败";
+          console.error(`[web-agent-quick-ask] ${message}`);
+          send({ type: "error", message });
+          finish();
+        });
+    },
+    cancel() {
+      closed = true;
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "cache-control": "no-cache, no-transform",
+      "content-type": "text/event-stream; charset=utf-8",
+      connection: "keep-alive",
+    },
+  });
+});
 
 app.post("/api/v1/runs", async (context) => {
   let body: unknown;
