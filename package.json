@@ -2,6 +2,7 @@
   "name": "super-agent",
   "version": "1.0.0",
   "type": "module",
+  "description": "动态意图识别的版本 - 很完善了",
   "bin": {
     "super-agent": "src/index.ts"
   },

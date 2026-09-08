@@ -1,5 +1,7 @@
 # WalrySuperAgent
 
+## 动态意图识别的版本 - 很完善了
+
 ### 启动web端
 
 执行命令：pnpm web
