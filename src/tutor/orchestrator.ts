@@ -10,7 +10,7 @@ import { truncateResult } from "../tools/registry.js";
 import { extractWeixinUrls, fetchWeixinArticle, stripWeixinUrls, type SourceArticle } from "../tools/weixin-article.js";
 import { DomainCatalog, MACRO_DOMAIN_LABELS, resolveMasteryPolicy } from "./domain/catalog.js";
 
-import { usesWebTeaching, WEB_TEACHING_POLICY, buildWebTeachingDecision, attachPlannedWebQuestion, recordWebQuestion } from "./web-teaching.js";
+import { usesWebTeaching, WEB_TEACHING_POLICY, buildWebTeachingDecision, buildWebRecoveryDecision, attachPlannedWebQuestion, recordWebQuestion } from "./web-teaching.js";
 
 const phaseLabels = {
   research: "正在建立学习对象与能力模型",
@@ -181,14 +181,14 @@ export class TutorOrchestrator {
       const reason = error instanceof Error ? error.message : "模型决策失败";
       console.error("[Tutor] 教学决策降级", error);
       await emit({ type: "model.degraded", stage: "decision", reason });
+      if (usesWebTeaching(state)) {
+        const recovery = buildWebRecoveryDecision(message, topicModel, state.activeConcept, nodeState);
+        recovery.thinking = "评估不可用：保留已有证据，恢复当前内容教学，不把技术故障转成学生的澄清任务。";
+        return recovery;
+      }
       const fallback = buildFallbackTurnDecision(message, topicModel, state.activeConcept, nodeState?.questionsAsked ?? []);
       fallback.thinking = `教学评估失败：${reason}。带着原话继续教，不要求复述，也不推进掌握状态。`;
       await emit({ type: "reasoning.delta", text: fallback.thinking });
-      if (usesWebTeaching(state)) {
-        fallback.responsePlan.question = "刚才的教学判断没有完成，你愿意指出需要我先澄清的具体一步吗？";
-        fallback.pedagogy!.questionPurpose = "clarify";
-        attachPlannedWebQuestion(topicModel, state.activeConcept, nodeState, fallback);
-      }
       return fallback;
     }
   }

@@ -7,7 +7,7 @@ import { isGenericRouteTitle } from "./topic-model.js";
 import type { SemanticTurnCandidate, TurnRoutingInput } from "./routing/turn-resolver.js";
 import { isKnowledgeType, isMacroDomain, KNOWLEDGE_TYPES, MACRO_DOMAINS, SUBJECT_CLASSIFIER_VERSION } from "./domain/catalog.js";
 
-import { OBSTACLE_KINDS, usesWebTeaching, domainTeachingGuidance } from "./web-teaching.js";
+import { OBSTACLE_KINDS, usesWebTeaching, domainTeachingGuidance, rubricSignal } from "./web-teaching.js";
 import { resolveMasteryPolicy } from "./domain/catalog.js";
 
 const capabilityPlanSchema = z.object({
@@ -62,8 +62,8 @@ export const webAnswerEvaluationSchema = answerEvaluationSchema.extend({
     purpose: z.enum(["accurate", "explained", "discrimination", "transfer", "performance", "introduce", "doubt-check", "clarify"]),
     text: z.string().trim().min(4),
     thinkingHint: z.string().trim().min(4),
-    expectedSignals: z.array(z.string().trim().min(1)).min(1).max(5),
-  })).min(1).max(6),
+    expectedSignals: z.array(z.string().trim().min(1)).max(5),
+  })).max(6),
 });
 
 const semanticTurnSchema = z.object({
@@ -82,6 +82,28 @@ const semanticTurnSchema = z.object({
   confidence: z.number().min(0).max(1),
   reason: z.string().min(1),
 });
+
+const semanticTurnContract = {
+  requiredFields: ["target", "primaryIntent", "sessionCommand", "confidence", "reason"],
+  target: semanticTurnSchema.shape.target.options,
+  primaryIntent: semanticTurnSchema.shape.primaryIntent.options,
+  sessionCommand: semanticTurnSchema.shape.sessionCommand.options,
+  explicitAction: semanticTurnSchema.shape.explicitAction.unwrap().options,
+  optionalFields: { requestedTopic: "仅原话明确新目标时给字符串，否则省略", explicitAction: "没有显式动作时省略，不输出 NONE" },
+  example: { target: "tutor", primaryIntent: "ASK_QUESTION", sessionCommand: "CONTINUE", confidence: 0.8, reason: "当前课程内追问" },
+};
+
+export function normalizeSemanticTurn(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const action = source.explicitAction;
+  return {
+    ...source,
+    requestedTopic: source.requestedTopic === null || source.requestedTopic === "" ? undefined : source.requestedTopic,
+    explicitAction: action === null || action === "NONE" || action === "none" || action === "" ? undefined : action,
+    reason: source.reason ?? source.rationale ?? "模型未提供分类依据",
+  };
+}
 
 const diagnosticOptionSchema = z.object({ id: z.string(), label: z.string() });
 const diagnosticDimensionSchema = z.object({
@@ -450,6 +472,26 @@ export function normalizeEvaluation(value: unknown): unknown {
   };
 }
 
+/** Optional teaching annotations may be absent in older model output. Never invent answer evidence. */
+export function normalizeWebEvaluation(value: unknown, model: TopicModel, index: number): unknown {
+  const normalized = normalizeEvaluation(value);
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return normalized;
+  const output = normalized as TutorAnswerEvaluation;
+  const obstacle = output.obstacle;
+  return {
+    ...output,
+    assessment: { ...output.assessment, score: output.assessment.score ?? undefined },
+    obstacle: obstacle && OBSTACLE_KINDS.includes(obstacle.kind)
+      ? { ...obstacle, description: obstacle.description ?? "", learnerQuote: obstacle.learnerQuote ?? "" }
+      : { kind: "none", description: "模型未提供具体障碍证据，先通过内容任务验证", learnerQuote: "" },
+    questionCandidates: (output.questionCandidates ?? []).map((candidate) => {
+      const signals = candidate.expectedSignals?.map((item) => item.trim()).filter(Boolean);
+      const anchor = rubricSignal(model, index, candidate.purpose);
+      return { ...candidate, expectedSignals: signals?.length ? signals : anchor ? [anchor] : [] };
+    }),
+  };
+}
+
 export function normalizeDiagnosis(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, any>;
@@ -572,14 +614,14 @@ async function generateJson<T>(input: {
   schema: z.ZodType<T, z.ZodTypeDef, any>;
   system: string;
   prompt: string;
-  contract?: unknown;
+  contract: unknown;
   normalize?: (value: unknown) => unknown;
   signal?: AbortSignal;
 }): Promise<T> {
   const result = await generateText({
     model: input.model,
     abortSignal: input.signal,
-    system: withAgentRules(`${input.system}\n只输出一个合法 JSON 对象，不要输出 Markdown、解释或代码围栏。`),
+    system: withAgentRules(`${input.system}\n字段合同：${JSON.stringify(input.contract)}\n只输出一个合法 JSON 对象，不要输出 Markdown、解释或代码围栏。`),
     prompt: input.prompt,
   });
 
@@ -593,8 +635,11 @@ async function generateJson<T>(input: {
       system: withAgentRules("把用户提供的模型输出修复成符合要求的合法 JSON。只输出 JSON 对象，不要解释。自然语言字段使用简体中文。"),
       prompt: JSON.stringify({
         requiredContract: input.contract,
+        taskInstructions: input.system,
+        taskContext: input.prompt,
         originalOutput: result.text,
-        validationError: String(firstError),
+        validationError: firstError instanceof z.ZodError
+          ? firstError.issues.map(({ path, code, message }) => ({ path, code, message })) : String(firstError),
       }),
     });
     try {
@@ -615,6 +660,8 @@ export class AiTutorModelClient implements TutorModelClient {
       model: this.model,
       schema: semanticTurnSchema,
       signal,
+      contract: semanticTurnContract,
+      normalize: normalizeSemanticTurn,
       system: [
         "你是私教系统的本轮语义分类器，只提供候选信号，不决定掌握状态，也不生成回答。",
         "区分三件事：用户本轮意图、学习会话命令、显式教学动作。不要把它们合并成一个标签。",
@@ -744,7 +791,8 @@ export class AiTutorModelClient implements TutorModelClient {
       schema: usesWebTeaching(input.state) ? webAnswerEvaluationSchema : answerEvaluationSchema,
       signal: abortSignal,
       contract: usesWebTeaching(input.state) ? { ...answerEvaluationContract, obstacle: { kind: OBSTACLE_KINDS, description: "具体缺口", learnerQuote: "学生原话" }, questionCandidateFields: ["purpose: accurate|explained|discrimination|transfer|performance|introduce|doubt-check|clarify", "text", "thinkingHint", "expectedSignals: string[]"] } : answerEvaluationContract,
-      normalize: normalizeEvaluation,
+      normalize: usesWebTeaching(input.state)
+        ? (value) => normalizeWebEvaluation(value, input.topicModel, input.state.activeConcept) : normalizeEvaluation,
       system: [
         "你是答案证据评估器，不负责决定教学阶段，不负责直接教学，也不能标记节点完成。",
         "只根据学生原话和给定 Rubric 评估可观察证据；不得替学生补全观点，不得因为表达流畅就判定掌握。",

@@ -10,6 +10,26 @@ export function usesWebTeaching(state: TutorState): boolean {
   return state.teachingPolicy === WEB_TEACHING_POLICY && state.sessionMode !== "explain";
 }
 
+/** Narrow classroom controls, never a semantic claim about the course content. */
+export function webRecoveryRequest(message: string): "continue" | "demonstrate" | "explain" | "hint" | undefined {
+  const text = message.trim().replace(/[，。！？!?、,\s]/gu, "");
+  if (/^(?:(?:没什么|没有|没|不|不用|无需)(?:需要)?(?:再)?澄清的?)?(?:请)?(?:继续|接着)(?:吧|讲|教学|学习)?$/u.test(text)) return "continue";
+  if (/^(?:请|帮我|给我)?(?:示范|演示)(?:一个|一下|一)?(?:具体)?(?:步骤|例子|操作)?(?:吧|看看)?$/u.test(text)) return "demonstrate";
+  if (/^(?:请|帮我)?(?:解释|讲解)(?:一个词|这个词|一下|清楚)?(?:吧)?$/u.test(text)) return "explain";
+  if (/^(?:请|给我|给点|需要)?(?:提示|线索)(?:吧|一下)?$/u.test(text)) return "hint";
+  return undefined;
+}
+
+export function rubricSignal(model: TopicModel, index: number, purpose: QuestionPurpose): string | undefined {
+  const rubric = model.rubricAnchors.find((item) => item.conceptId === model.conceptRoute[index]?.id);
+  if (!rubric) return undefined;
+  const signals: Partial<Record<QuestionPurpose, string>> = {
+    accurate: rubric.accuracy, explained: rubric.explanation, discrimination: rubric.discrimination,
+    transfer: rubric.transfer, performance: rubric.performance,
+  };
+  return signals[purpose]?.trim() || undefined;
+}
+
 function isQuote(message: string, quote: string): boolean {
   return Boolean(quote.trim()) && message.replace(/\s/gu, "").includes(quote.replace(/\s/gu, ""));
 }
@@ -35,10 +55,15 @@ function feedbackFor(model: TopicModel, index: number, node: NodeLearningState |
 
 /** The controller attaches provenance; model output cannot invent a question ID or execution proof. */
 export function auditWebEvaluation(message: string, node: NodeLearningState | undefined, evaluation: TutorAnswerEvaluation): TutorAnswerEvaluation {
+  const request = webRecoveryRequest(message);
+  const confirmsNoDoubts = request === "continue" && node?.activeQuestion?.purpose === "doubt-check" && evaluation.intent === "no_doubts";
+  if (request && !confirmsNoDoubts) evaluation = { ...evaluation, intent: request === "continue" ? "clarification" : "direct_answer_request" };
   const question = node?.activeQuestion;
   const canAssess = evaluation.intent === "answer" && question && !["clarify", "doubt-check"].includes(question.purpose);
   const obstacle = evaluation.obstacle;
-  const groundedObstacle: LearningObstacle = obstacle && (obstacle.kind === "none" || isQuote(message, obstacle.learnerQuote))
+  const groundedObstacle: LearningObstacle = evaluation.intent !== "answer"
+    ? { kind: "none", description: "当前是教学请求，不是知识作答", learnerQuote: "" }
+    : obstacle && (obstacle.kind === "none" || isQuote(message, obstacle.learnerQuote))
     ? obstacle
     : { kind: "uncertain", description: "需要确认你当前卡住的位置", learnerQuote: "" };
   const evidence = canAssess ? evaluation.assessment.evidence
@@ -105,6 +130,40 @@ function newQuestion(nodeId: string, purpose: QuestionPurpose, text: string, hin
   return { id: `question_${randomUUID()}`, nodeId, purpose, text: stripHint(text), thinkingHint: hint, support, expectedSignals };
 }
 
+/** Bounded, rubric-bound recovery tasks: infrastructure failure never asks the student to choose help again. */
+export function contentRecoveryQuestion(model: TopicModel, index: number, node: NodeLearningState | undefined, purpose: QuestionPurpose, support: TeachingSupport): TeachingQuestion | undefined {
+  const current = model.conceptRoute[index];
+  const anchor = rubricSignal(model, index, purpose);
+  if (!current) return undefined;
+  const title = current.title;
+  const prompts: Partial<Record<QuestionPurpose, string[]>> = {
+    accurate: [`围绕“${title}”，请给出一个具体例子，指出其中涉及的对象及它们的关系。`, `回到“${title}”，请用当前材料中的一个具体事实说明你的理解。`, `关于“${title}”，请写出一个你能确认的判断，并说明它适用的条件。`],
+    explained: [`在“${title}”的一个具体例子里，哪个环节把条件与结果联系起来？`, `请沿着“${title}”的一个例子，说明从条件到结果中间发生的一步变化。`, `如果去掉“${title}”中的一个关键条件，你认为结果为何会变化？`],
+    discrimination: [`请给出“${title}”适用和不适用的各一个例子，指出决定区别的条件。`, `围绕“${title}”，怎样只改变一个条件，就让原来的判断不再成立？`, `请指出一个容易被误认为符合“${title}”的例子，并说明判断依据。`],
+    transfer: [`请选一个这堂课还没讨论过的实际场景，用“${title}”作出一个有依据的判断。`, `换到一个与你之前例子不同的场景，“${title}”的哪个原则仍然适用？请具体应用一次。`, `请构造一个含有新限制的情境，并说明如何用“${title}”处理这个限制。`],
+    performance: [`请围绕“${title}”提交一个最小实际产物，并说明它对应的任务条件。`],
+  };
+  const text = prompts[purpose]?.find((item) => !questionAlreadyAsked(node?.questionsAsked ?? [], item));
+  if (anchor && text) return newQuestion(current.id, purpose, text, "先给一个具体例子或步骤，不必概括整节课", support, [anchor]);
+  if (!questionAlreadyAsked(node?.questionsAsked ?? [], current.openingQuestion)) {
+    return newQuestion(current.id, "introduce", current.openingQuestion, current.openingHint, "hint", []);
+  }
+  return undefined;
+}
+
+export function buildWebRecoveryDecision(message: string, model: TopicModel, activeConcept: number, nodeState?: NodeLearningState): TutorTurnDecision {
+  return buildWebTeachingDecision({
+    model, activeConcept, nodeState, message,
+    evaluation: {
+      intent: "clarification", understoodMeaning: "本轮评估不可用，仅恢复内容教学，不作掌握判断",
+      obstacle: { kind: "none", description: "本轮没有可靠的评估结果", learnerQuote: "" },
+      observations: [], assessment: { status: "not-answered", rubricEvidence: [], evidence: [] },
+      misconceptionUpdates: [], pedagogy: { hit: "", unpunched: "本轮未作能力判定", invented: "", sourceMove: "回到当前内容" },
+      questionCandidates: [],
+    },
+  });
+}
+
 /** Always select the entire candidate. No different-purpose fallback is allowed. */
 export function buildWebTeachingDecision(input: {
   model: TopicModel; activeConcept: number; nodeState?: NodeLearningState;
@@ -125,6 +184,20 @@ export function buildWebTeachingDecision(input: {
 
   const missing = feedback.missingCriteria[0] ?? "discrimination";
   const move = nextMove(obstacle, evaluation.intent, missing, nodeState?.stalledTurns ?? 0);
+  const request = webRecoveryRequest(input.message);
+  const leavingClarification = nodeState?.activeQuestion?.purpose === "clarify";
+  if (request || (leavingClarification && move.purpose === "clarify")) {
+    move.purpose = missing;
+    move.action = request && request !== "continue" ? "give-example" : "ask-socratic-question";
+    move.support = request === "hint" ? "hint" : request && request !== "continue" ? "worked-example" : "none";
+    move.instruction = request === "hint"
+      ? "只给一个最小线索，再让学生完成题卡判断，不展开示范或答案"
+      : request === "explain"
+      ? "解释学生所问的当前术语或步骤，再让学生完成题卡中的具体判断，不再询问是否需要解释"
+      : request === "demonstrate"
+      ? "按学生请求示范一个当前内容步骤，再让学生完成题卡中的一个具体判断，不再询问是否需要示范"
+      : "结束澄清，回到当前关卡的具体内容任务；本轮请求不算掌握证据";
+  }
   // An existing unresolved misconception must be repaired before practising unrelated criteria.
   if (decision.nextAction === "repair-misconception" && move.purpose !== "clarify") {
     move.purpose = "discrimination";
@@ -132,7 +205,7 @@ export function buildWebTeachingDecision(input: {
     move.support = "hint";
     move.instruction = "针对尚未修复的误区使用最小反例，修复后再做独立新题";
   }
-  if (["direct_answer_request", "clarification", "disagreement", "meta_question"].includes(evaluation.intent)) {
+  if (!request && ["direct_answer_request", "clarification", "disagreement", "meta_question"].includes(evaluation.intent)) {
     move.action = "explain";
     move.support = "hint";
     move.instruction = "先回答实际疑问，核对学生的合理质疑，再让其完成一个小判断；求助本身不算作答";
@@ -141,24 +214,32 @@ export function buildWebTeachingDecision(input: {
   const candidate = evaluation.questionCandidates.find((item) => item.purpose === move.purpose
     && item.text.trim() && item.expectedSignals?.length
     && !questionAlreadyAsked(nodeState?.questionsAsked ?? [], stripHint(item.text)));
-  let question: TeachingQuestion;
+  let question: TeachingQuestion | undefined;
   if (candidate) {
     question = newQuestion(current.id, candidate.purpose, candidate.text, candidate.thinkingHint, move.support, candidate.expectedSignals!);
   } else {
-    // No invented content probe, no relabelled transfer evidence: this is explicitly a clarification.
-    question = newQuestion(current.id, "clarify", `围绕“${current.title}”，你希望我先澄清题意、解释一个词，还是示范一个步骤？`, "可以指出原题中具体不清楚的位置", "none", []);
-    move.action = "ask-clarification";
-    move.instruction = "目前没有合适的内容探针，先确认需要的帮助；不要据此判断掌握";
+    const purpose = move.purpose === "clarify" ? missing : move.purpose;
+    question = contentRecoveryQuestion(model, activeConcept, nodeState, purpose, move.support);
+    if (question) {
+      move.action = move.support === "none" ? "ask-socratic-question" : "give-example";
+      move.instruction = move.support === "none" ? "回到当前内容，用题卡中的具体任务验证，不再重复帮助菜单"
+        : move.support === "hint" ? "只给一个最小线索，随后让学生完成题卡任务，不展开示范或答案，不再重复帮助菜单"
+        : request === "explain" ? "解释学生所问的当前术语或步骤，随后让学生完成题卡任务，不再询问是否需要解释"
+        : "提供一个最小内容示范，随后让学生完成题卡任务，不再询问要不要示范";
+    } else {
+      move.action = "explain";
+      move.instruction = "暂时无法生成新的有效内容题，明确说明并保留进度；不重复已问题目，不追加澄清菜单，不宣称掌握";
+    }
   }
   decision.nextAction = move.action;
   decision.responsePlan = {
     ...decision.responsePlan,
     goal: move.instruction,
     gapToRepair: obstacle.kind === "none" ? decision.responsePlan.gapToRepair : obstacle.description,
-    question: question.text,
+    question: question?.text,
   };
   decision.pedagogy = {
-    ...decision.pedagogy!, nextQuestion: question.text, questionPurpose: question.purpose,
+    ...decision.pedagogy!, nextQuestion: question?.text ?? "", questionPurpose: question?.purpose ?? "introduce",
   };
   feedback.gap = decision.responsePlan.gapToRepair;
   feedback.nextStep = move.instruction;
@@ -178,14 +259,18 @@ export function attachPlannedWebQuestion(model: TopicModel, index: number, node:
   if (raw && purpose && !["complete", "switch-topic"].includes(decision.nextAction)) {
     const hint = raw.match(/（思路：([\s\S]*)）\s*$/u)?.[1] ?? current.openingHint;
     const isHelp = ["give-example", "explain"].includes(decision.nextAction);
-    if (node?.activeQuestion && isHelp) {
-      question = { ...node.activeQuestion, support: decision.nextAction === "explain" || node.activeQuestion.support === "worked-example" ? "worked-example" : "hint" };
+    const helpSupport = decision.intent === "dont_know" ? "hint" : "worked-example";
+    if (node?.activeQuestion && isHelp && node.activeQuestion.purpose !== "clarify" && node.activeQuestion.purpose !== "doubt-check") {
+      question = { ...node.activeQuestion, support: node.activeQuestion.support === "worked-example" ? "worked-example" : helpSupport };
+    } else if (isHelp && (!node?.activeQuestion || node.activeQuestion.purpose === "clarify")) {
+      question = contentRecoveryQuestion(model, index, node, feedback.missingCriteria[0] ?? "accurate", helpSupport);
+      if (!question) decision.responsePlan.goal = "暂时没有新的有效内容题，先回应本次帮助请求并保留进度；不重复已问题目，不追加澄清菜单，不宣称掌握";
     } else {
       // A reused opening question is an introduction, never masquerading as a new transfer task.
       question = newQuestion(current.id, purpose === "doubt-check" || purpose === "clarify" ? purpose : "introduce", raw, hint, purpose === "doubt-check" ? "none" : "hint", []);
     }
-    decision.responsePlan.question = question.text;
-    decision.pedagogy = { ...decision.pedagogy!, questionPurpose: question.purpose, nextQuestion: question.text };
+    decision.responsePlan.question = question?.text;
+    decision.pedagogy = { ...decision.pedagogy!, questionPurpose: question?.purpose ?? "introduce", nextQuestion: question?.text ?? "" };
   }
   feedback.nextStep = decision.responsePlan.goal;
   decision.webTeaching = { ...decision.webTeaching, question, feedback };
@@ -197,6 +282,7 @@ export function recordWebQuestion(state: TutorState, decision: TutorTurnDecision
   const node = current && state.nodeLearningStates[current.id];
   if (!node) return;
   const question = decision.webTeaching?.question;
+  const leftClarification = node.activeQuestion?.purpose === "clarify" && question && question.purpose !== "clarify";
   node.activeQuestion = question;
   if (question) {
     node.questionHistory ??= [];
@@ -205,7 +291,8 @@ export function recordWebQuestion(state: TutorState, decision: TutorTurnDecision
     else node.questionHistory.push({ ...question });
   }
   node.lastObstacle = decision.webTeaching?.obstacle;
-  if (decision.intent === "answer" || decision.intent === "dont_know") {
+  if (leftClarification) node.stalledTurns = 0;
+  else if (decision.intent === "answer" || decision.intent === "dont_know") {
     node.stalledTurns = decision.assessment.evidence.some((item) => item.strength === "sufficient") ? 0 : (node.stalledTurns ?? 0) + 1;
   }
 }
