@@ -9,5 +9,8 @@ super-agent.config.json
 .traces/
 */*.test.ts
 .tutor-data/
+.knowledge-data/
+output/
 .env-gpt-cheerful-sitor-intent-recognition
 super-agent.config-gpt-cheerful-sitor-intent-recognition.json
+!src/knowledge/*.test.ts

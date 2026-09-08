@@ -6,6 +6,68 @@
 
 执行命令：pnpm web
 
+## 知识库第一阶段：MinerU 解析与检索
+
+第一阶段已经提供独立的知识库 HTTP 接口：Walry 负责上传、调用 MinerU、保存解析产物、分块和向量化；Tutor 仍未在本阶段自动使用知识库，第二阶段再接入 `TutorOrchestrator`。
+
+### 启动 MinerU
+
+建议把 MinerU 作为单独的 Python 服务运行，不放进 Node Agent 容器：
+
+```bash
+mineru-api --host 127.0.0.1 --port 8000
+```
+
+如果想只启动一个命令，可以在修复当前 Python 环境的 `_lzma` 支持后使用：
+
+```bash
+pnpm web:with-mineru
+```
+
+这个命令会复用项目根目录的 `.venv-mineru`，先启动并检查 MinerU，再启动 Walry Web；退出 Walry 时会回收由它启动的 MinerU。如果 MinerU 已经在 `127.0.0.1:8000` 运行，则会直接复用已有进程。
+
+Walry `.env` 至少配置：
+
+```env
+MINERU_BASE_URL=http://127.0.0.1:8000
+KNOWLEDGE_DATA_DIR=.knowledge-data
+DASHSCOPE_API_KEY=你的EmbeddingKey
+KNOWLEDGE_BASE_ID=default
+KNOWLEDGE_OWNER_ID=local
+KNOWLEDGE_MAX_UPLOAD_BYTES=52428800
+MINERU_TIMEOUT_MS=600000
+MINERU_BACKEND=pipeline
+# 如果 Walry 不是只监听本机，必须配置；请求使用 Authorization: Bearer <token>
+KNOWLEDGE_API_TOKEN=替换成随机长字符串
+# 配置后使用 PostgreSQL/pgvector；不配置时使用 .knowledge-data/index.json
+POSTGRES_URL=postgresql://...
+```
+
+如果使用 PostgreSQL，数据库用户需要能够启用 `vector` 扩展。知识库服务首次访问时会创建 `knowledge_documents` 和 `knowledge_chunks` 表。
+
+### 上传文档
+
+```bash
+curl -X POST http://127.0.0.1:3100/api/v1/knowledge/documents \
+  -F 'file=@/absolute/path/lesson.pdf' \
+  -H 'Authorization: Bearer 替换成随机长字符串'
+```
+
+支持范围由当前 MinerU 服务决定，通常包括 PDF、图片、DOCX、PPTX 和 XLSX。原文件、Markdown、`content-list.json` 和解析出的图片会保存在 `KNOWLEDGE_DATA_DIR/documents/<documentId>/`。
+
+### 检索文档
+
+```bash
+curl -X POST http://127.0.0.1:3100/api/v1/knowledge/search \
+  -H 'content-type: application/json' \
+  -H 'Authorization: Bearer 替换成随机长字符串' \
+  -d '{"query":"现金流和资产的关系","topK":5}'
+```
+
+第一阶段固定使用 `KNOWLEDGE_BASE_ID + KNOWLEDGE_OWNER_ID` 作为单知识库 scope，客户端不能通过请求体伪造 owner。默认只允许本机访问；如果部署到非本机监听地址，必须配置 `KNOWLEDGE_API_TOKEN`。第二阶段接入 Sitor 登录后，再把 owner 替换为服务端解析出的真实用户 ID。
+
+检索结果会返回文档名、页码、章节、分块内容和分数。
+
 ## 最成熟
 
 目前做的最好的agent分支是gpt-cheerful-sitor
