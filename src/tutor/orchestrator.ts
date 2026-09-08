@@ -366,6 +366,7 @@ export class TutorOrchestrator {
           userGoal,
           history: state.messages,
           materials: researchMaterial ? [researchMaterial] : [],
+          teachingPolicy: usesWebTeaching(state) ? WEB_TEACHING_POLICY : undefined,
         }, signal));
         if (researchMaterial) {
           const urls = sourceUrl ? [sourceUrl] : [...new Set(researchMaterial.match(/https?:\/\/\S+/g) ?? [])];

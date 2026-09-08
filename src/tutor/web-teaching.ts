@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveMasteryPolicy } from "./domain/catalog.js";
 import { buildEvidenceDrivenDecision, questionAlreadyAsked } from "./pedagogy.js";
+import { explanationTasks, usableHint, type ScaffoldedTask } from "./question-hints.js";
 import type { EvidenceCriterion, LearningObstacle, NodeLearningState, QuestionPurpose, TeachingFeedback, TeachingQuestion, TeachingSupport, TopicModel, TutorAnswerEvaluation, TutorState, TutorTurnDecision } from "./types.js";
 
 export const WEB_TEACHING_POLICY = "web-teacher.v2" as const;
@@ -127,7 +128,7 @@ function nextMove(obstacle: LearningObstacle, intent: TutorAnswerEvaluation["int
 }
 
 function newQuestion(nodeId: string, purpose: QuestionPurpose, text: string, hint: string, support: TeachingSupport, expectedSignals: string[]): TeachingQuestion {
-  return { id: `question_${randomUUID()}`, nodeId, purpose, text: stripHint(text), thinkingHint: hint, support, expectedSignals };
+  return { id: `question_${randomUUID()}`, nodeId, purpose, text: stripHint(text), thinkingHint: usableHint(hint, stripHint(text)), support, expectedSignals };
 }
 
 /** Bounded, rubric-bound recovery tasks: infrastructure failure never asks the student to choose help again. */
@@ -136,15 +137,27 @@ export function contentRecoveryQuestion(model: TopicModel, index: number, node: 
   const anchor = rubricSignal(model, index, purpose);
   if (!current) return undefined;
   const title = current.title;
-  const prompts: Partial<Record<QuestionPurpose, string[]>> = {
-    accurate: [`围绕“${title}”，请给出一个具体例子，指出其中涉及的对象及它们的关系。`, `回到“${title}”，请用当前材料中的一个具体事实说明你的理解。`, `关于“${title}”，请写出一个你能确认的判断，并说明它适用的条件。`],
-    explained: [`在“${title}”的一个具体例子里，哪个环节把条件与结果联系起来？`, `请沿着“${title}”的一个例子，说明从条件到结果中间发生的一步变化。`, `如果去掉“${title}”中的一个关键条件，你认为结果为何会变化？`],
-    discrimination: [`请给出“${title}”适用和不适用的各一个例子，指出决定区别的条件。`, `围绕“${title}”，怎样只改变一个条件，就让原来的判断不再成立？`, `请指出一个容易被误认为符合“${title}”的例子，并说明判断依据。`],
-    transfer: [`请选一个这堂课还没讨论过的实际场景，用“${title}”作出一个有依据的判断。`, `换到一个与你之前例子不同的场景，“${title}”的哪个原则仍然适用？请具体应用一次。`, `请构造一个含有新限制的情境，并说明如何用“${title}”处理这个限制。`],
-    performance: [`请围绕“${title}”提交一个最小实际产物，并说明它对应的任务条件。`],
+  const prompts: Partial<Record<QuestionPurpose, ScaffoldedTask[]>> = {
+    accurate: [
+      { text: `围绕“${title}”，请给出一个具体例子，指出其中涉及的对象及它们的关系。`, hint: "先从刚才讨论的场景里选两个对象，分别标出它们的角色，再用一个动词连接它们；不要先下整件事对错的结论。" },
+      { text: `回到“${title}”，请用当前材料中的一个具体事实说明你的理解。`, hint: "定位材料中一句描述实际情况的话，圈出对象和条件；先把原文信息与自己的推测分开，再用前者支持判断。" },
+      { text: `关于“${title}”，请写出一个你能确认的判断，并说明它适用的条件。`, hint: "先写成「在___条件下，___」，再检查前半句是否漏掉时间、范围或对象限制；暂时不要扩展到所有情况。" },
+    ],
+    explained: explanationTasks(title, current.knowledgeTypes),
+    discrimination: [
+      { text: `请给出“${title}”适用和不适用的各一个例子，指出决定区别的条件。`, hint: "先固定同一个场景，只改变一个特征做成一对例子；将这个差异与定义要求对应，避免两个例子处处不同。" },
+      { text: `围绕“${title}”，怎样只改变一个条件，就让原来的判断不再成立？`, hint: "把原判断依赖的条件列成清单，一次只取走一项，其余保持原样；先试最可能不可缺少的一项。" },
+      { text: `请指出一个容易被误认为符合“${title}”的例子，并说明判断依据。`, hint: "分开列「表面上相似的特征」和「定义不可缺少的条件」，找一个具有前者却缺少后者的场景。" },
+    ],
+    transfer: [
+      { text: `请选一个这堂课还没讨论过的实际场景，用“${title}”作出一个有依据的判断。`, hint: "先列旧例子中的对象、关系和限制，再为新场景逐项找对应；换名称不算新应用，至少检查一项条件是否真的不同。" },
+      { text: `换到一个与你之前例子不同的场景，“${title}”的哪个原则仍然适用？请具体应用一次。`, hint: "把两个场景并排写，划掉仅是名称或外观的变化；检查剩余的关系和适用条件，先确认条件再套原则。" },
+      { text: `请构造一个含有新限制的情境，并说明如何用“${title}”处理这个限制。`, hint: "保留旧例子的目标，只增加一个限制；先标出原做法中哪一步依赖了现在不再满足的条件。" },
+    ],
+    performance: [{ text: `请围绕“${title}”提交一个最小实际产物，并说明它对应的任务条件。`, hint: "先列「输入或材料｜一个操作｜可观察产物」，只完成这一条最短路径，再把产物与任务条件逐项对照。" }],
   };
-  const text = prompts[purpose]?.find((item) => !questionAlreadyAsked(node?.questionsAsked ?? [], item));
-  if (anchor && text) return newQuestion(current.id, purpose, text, "先给一个具体例子或步骤，不必概括整节课", support, [anchor]);
+  const task = prompts[purpose]?.find((item) => !questionAlreadyAsked(node?.questionsAsked ?? [], item.text));
+  if (anchor && task) return newQuestion(current.id, purpose, task.text, task.hint, support, [anchor]);
   if (!questionAlreadyAsked(node?.questionsAsked ?? [], current.openingQuestion)) {
     return newQuestion(current.id, "introduce", current.openingQuestion, current.openingHint, "hint", []);
   }
@@ -261,7 +274,7 @@ export function attachPlannedWebQuestion(model: TopicModel, index: number, node:
     const isHelp = ["give-example", "explain"].includes(decision.nextAction);
     const helpSupport = decision.intent === "dont_know" ? "hint" : "worked-example";
     if (node?.activeQuestion && isHelp && node.activeQuestion.purpose !== "clarify" && node.activeQuestion.purpose !== "doubt-check") {
-      question = { ...node.activeQuestion, support: node.activeQuestion.support === "worked-example" ? "worked-example" : helpSupport };
+      question = { ...node.activeQuestion, thinkingHint: usableHint(node.activeQuestion.thinkingHint, node.activeQuestion.text), support: node.activeQuestion.support === "worked-example" ? "worked-example" : helpSupport };
     } else if (isHelp && (!node?.activeQuestion || node.activeQuestion.purpose === "clarify")) {
       question = contentRecoveryQuestion(model, index, node, feedback.missingCriteria[0] ?? "accurate", helpSupport);
       if (!question) decision.responsePlan.goal = "暂时没有新的有效内容题，先回应本次帮助请求并保留进度；不重复已问题目，不追加澄清菜单，不宣称掌握";

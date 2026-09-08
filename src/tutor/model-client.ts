@@ -7,8 +7,9 @@ import { isGenericRouteTitle } from "./topic-model.js";
 import type { SemanticTurnCandidate, TurnRoutingInput } from "./routing/turn-resolver.js";
 import { isKnowledgeType, isMacroDomain, KNOWLEDGE_TYPES, MACRO_DOMAINS, SUBJECT_CLASSIFIER_VERSION } from "./domain/catalog.js";
 
-import { OBSTACLE_KINDS, usesWebTeaching, domainTeachingGuidance, rubricSignal } from "./web-teaching.js";
+import { OBSTACLE_KINDS, usesWebTeaching, domainTeachingGuidance, rubricSignal, WEB_TEACHING_POLICY } from "./web-teaching.js";
 import { resolveMasteryPolicy } from "./domain/catalog.js";
+import { QUESTION_HINT_GUIDANCE, usableHint } from "./question-hints.js";
 
 const capabilityPlanSchema = z.object({
   acquisition: z.array(z.string()),
@@ -61,7 +62,7 @@ export const webAnswerEvaluationSchema = answerEvaluationSchema.extend({
   questionCandidates: z.array(z.object({
     purpose: z.enum(["accurate", "explained", "discrimination", "transfer", "performance", "introduce", "doubt-check", "clarify"]),
     text: z.string().trim().min(4),
-    thinkingHint: z.string().trim().min(4),
+    thinkingHint: z.string().trim(),
     expectedSignals: z.array(z.string().trim().min(1)).max(5),
   })).max(6),
 });
@@ -198,6 +199,7 @@ export type TutorModelClient = {
     userGoal: string;
     history: ModelMessage[];
     materials?: string[];
+    teachingPolicy?: TutorState["teachingPolicy"];
   }, signal?: AbortSignal): Promise<TopicModel>;
   evaluateAnswer(input: {
     message: string;
@@ -487,7 +489,7 @@ export function normalizeWebEvaluation(value: unknown, model: TopicModel, index:
     questionCandidates: (output.questionCandidates ?? []).map((candidate) => {
       const signals = candidate.expectedSignals?.map((item) => item.trim()).filter(Boolean);
       const anchor = rubricSignal(model, index, candidate.purpose);
-      return { ...candidate, expectedSignals: signals?.length ? signals : anchor ? [anchor] : [] };
+      return { ...candidate, thinkingHint: usableHint(candidate.thinkingHint, candidate.text), expectedSignals: signals?.length ? signals : anchor ? [anchor] : [] };
     }),
   };
 }
@@ -676,7 +678,7 @@ export class AiTutorModelClient implements TutorModelClient {
     });
   }
 
-  async buildTopicModel(input: { userGoal: string; history: ModelMessage[]; materials?: string[] }, signal?: AbortSignal): Promise<TopicModel> {
+  async buildTopicModel(input: Parameters<TutorModelClient["buildTopicModel"]>[0], signal?: AbortSignal): Promise<TopicModel> {
     const model = await generateJson({
       model: this.model,
       schema: topicModelSchema,
@@ -695,6 +697,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "backgroundBrief 必须是一段可独立阅读的主题摘要，建议 300-600 个中文字符。读者只读这一段，也应大致知道：主题是什么、为何产生或要解决什么问题、核心组成/机制、典型用途、适用边界，以及接下来会学什么。不能只写两三句定义。",
         "每个路线节点的 target 必须写出进入教学时要介绍的具体背景、核心内容或例子，不能只写‘理解某概念’之类的抽象目标。",
         "每个路线节点都必须预先设计 openingQuestion 和 openingHint。openingQuestion 是老师讲完该节点第一个最小知识块后，用来摸学生当前理解的主题专属问题；应要求判断、比较、解释或联系真实场景，不能让学生复述摘要。openingHint 只给思考入口，不能泄露答案。",
+        ...(input.teachingPolicy === WEB_TEACHING_POLICY ? ["openingQuestion 必须直接给出可供思考的具体情境与已知条件，不能只嵌入节点长标题让学生自行发明例子。openingHint 要点名题中对象，并搭好一个可执行的第一步（标出已知未知、只变一个条件、追踪一个输入、定位原文），将关键判断留给学生；不能只说‘举个例子、联系实际、仔细想想’。问题与提示一起自检，无法提供有效支架时重新设计题目。"] : []),
         "核心概念必须在节点标题中明确出现，不能藏在‘基础知识’‘重要性’等泛化标题下。",
         `路线节点必须是学习对象本身的知识/内容节点。判断标准：去掉这个节点后，学习者对该领域的理解是否有实质缺失？\u201C明确学习目标\u201D\u201C批判性思考\u201D\u201C形成应用清单\u201D等属于教学技法，应融入内容节点的教学过程，不作为独立节点。`,
         "节点数量由当前用户目标下不可省略的内容块决定，常见 2-7 个，不是固定 4 段。禁止用「基础定位、核心机制、边界辨析、实践应用」或同义四拍凑节点。用户目标较窄时，只覆盖该目标，不要扩成领域通识课。",
@@ -806,6 +809,7 @@ export class AiTutorModelClient implements TutorModelClient {
         "questionCandidates 只是候选探针，不得决定 nextAction。每个候选必须绑定一个 purpose，并来自当前节点。",
         "每个 questionCandidate 必须提供 thinkingHint，只提示思考方向、比较维度或可回忆的经历，不能泄露答案。",
         ...(usesWebTeaching(input.state) ? [
+          QUESTION_HINT_GUIDANCE,
           "Web 教师策略：先判一个主要障碍 obstacle，再给有区分度的候选问题。kind=none 代表没有具体错误但可能还缺证据；仅当真需澄清未知时用 uncertain。description 写具体问题，learnerQuote 引用原话；不要把未答题或不同观点直接判误区。",
           "依次排除题意含混、陌生术语、前置不足、表示困难、操作失误，再判断概念/因果误区。连续无新证据时换表示或给最小示范，不同义重问。",
           "questionCandidates 必须包含 remainingCriteria 中本轮作答之后仍缺的第一个维度的全新任务；概念/因果误区额外提供 discrimination，题意不清额外提供 clarify。每个问题提供 expectedSignals（内部合格信号），题面不能泄露这些信号。",
