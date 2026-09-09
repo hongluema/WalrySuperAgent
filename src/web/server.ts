@@ -33,6 +33,9 @@ const quickAskSchema = z.object({
     chapter: z.string().trim().optional(),
     objective: z.string().trim().optional(),
     recentDialogue: z.string().trim().optional(),
+    highlight: z.string().trim().max(2000).optional(),
+    sourceContext: z.record(z.unknown()).optional(),
+    history: z.array(z.record(z.unknown())).max(8).optional(),
   }).optional(),
 });
 
