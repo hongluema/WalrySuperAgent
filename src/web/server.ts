@@ -13,7 +13,7 @@ const runSchema = z.object({
   diagnosticAnswers: z.record(z.string()).optional(),
   teachingPolicy: z.enum(["legacy.v1", "web-teacher.v2"]).optional(),
   learningSupport: z.object({ questionId: z.string().trim().min(1).max(120), hintSeen: z.boolean() }).optional(),
-  sessionMode: z.enum(["teach", "explain"]).optional(),
+  sessionMode: z.enum(["teach", "explain", "read"]).optional(),
   clientCommand: z.object({
     type: z.literal("UPDATE_SUBJECT"),
     correction: z.object({

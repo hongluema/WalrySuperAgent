@@ -6,7 +6,7 @@ export type TurnRoutingInput = {
   hasActiveSession: boolean;
   phase?: TutorPhase;
   currentTopic?: string;
-  sessionMode?: "teach" | "explain";
+  sessionMode?: "teach" | "explain" | "read";
   clientCommand?: ClientTutorCommand;
 };
 
@@ -166,6 +166,16 @@ export class TurnResolver {
         explicitAction: "CLARIFY_GOAL",
         confidence: 1,
         reasonCodes: ["structured-subject-correction"],
+      });
+    }
+
+    if (input.sessionMode === "read") {
+      return resolution({
+        target: "tutor", mode: "course",
+        primaryIntent: input.hasActiveSession ? "ASK_QUESTION" : "START_LEARNING",
+        sessionCommand: input.hasActiveSession ? "CONTINUE" : "CREATE",
+        explicitAction: "EXPLAIN", confidence: 1,
+        reasonCodes: ["book-study-mode"],
       });
     }
 

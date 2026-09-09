@@ -8,7 +8,7 @@ export const WEB_TEACHING_POLICY = "web-teacher.v2" as const;
 export const OBSTACLE_KINDS = ["none", "missing-fact", "prerequisite-gap", "representation-gap", "concept-boundary", "causal-model", "procedure-error", "transfer-gap", "evidence-gap", "expression-gap", "task-ambiguity", "load-or-affect", "uncertain"] as const;
 
 export function usesWebTeaching(state: TutorState): boolean {
-  return state.teachingPolicy === WEB_TEACHING_POLICY && state.sessionMode !== "explain";
+  return state.teachingPolicy === WEB_TEACHING_POLICY && (state.sessionMode ?? "teach") === "teach";
 }
 
 /** Narrow classroom controls, never a semantic claim about the course content. */

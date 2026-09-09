@@ -1,3 +1,4 @@
+import { BOOK_STUDY_GUIDANCE, bookTurnSchema, type BookTurn } from "./book-study.js";
 import { generateText, streamText } from "ai";
 import { z } from "zod";
 import type { ModelMessage } from "ai";
@@ -194,6 +195,8 @@ const diagnosisSchema = z.object({
 });
 
 export type TutorModelClient = {
+  planBookTurn?(input: { message: string; state: TutorState; material?: string; now: string }, signal?: AbortSignal): Promise<BookTurn>;
+  streamBookResponse?(input: { message: string; state: TutorState; material?: string; now: string }, onDelta: (text: string) => Promise<void> | void, signal?: AbortSignal): Promise<string>;
   classifyTurn?(input: TurnRoutingInput, signal?: AbortSignal): Promise<SemanticTurnCandidate>;
   buildTopicModel(input: {
     userGoal: string;
@@ -656,6 +659,40 @@ async function generateJson<T>(input: {
 
 export class AiTutorModelClient implements TutorModelClient {
   constructor(private readonly model: any) {}
+
+  async planBookTurn(input: { message: string; state: TutorState; material?: string; now: string }, signal?: AbortSignal): Promise<BookTurn> {
+    return generateJson({
+      model: this.model, schema: bookTurnSchema, signal,
+      system: `${BOOK_STUDY_GUIDANCE}\n你只整理本轮阅读状态增量，不写给用户的回答。保留已知上下文；bookTitle 尚未明确时用“待确认书籍”。识别真实书名后再建立该书记录。chapters 和 notes 只包含新增或修改项；assessments 无独立作答时必须为空。`,
+      contract: {
+        bookTitle: "书名，已有书复用原名", author: "作者或空字符串", goal: "阅读目的", background: "读者基础",
+        format: "材料形式", timeline: "阅读安排", coreQuestion: "全书核心问题", currentChapter: "当前章节或待确认",
+        phase: ["opening", "guide", "reading", "ingest", "practice", "review", "summary"], nextAction: "建议下一步",
+        chapters: [{ id: "稳定章节id", title: "有依据的章节名", coreQuestion: "章节问题", read: false }],
+        notes: [{ id: "稳定笔记id", kind: "concept|case|model|quote|question|chapter", title: "标题", chapter: "章节", content: "笔记内容", source: "真实来源或来源待确认", myUnderstanding: "仅学生原话理解，没有则空字符串", resolved: false }],
+        assessments: [{ noteId: "本书已有概念或模型id", evidence: [{ criterion: "accurate|explained|applied|discriminated", quote: "本轮学生逐字原话" }], exampleQuote: "学生举例原话或空字符串", practiceQuote: "完成实际应用原话或空字符串", independent: false, passed: false }],
+      },
+      prompt: JSON.stringify({ ...input, state: undefined, library: input.state.bookStudy, history: input.state.messages.slice(-20) }),
+    });
+  }
+
+  async streamBookResponse(input: { message: string; state: TutorState; material?: string; now: string }, onDelta: (text: string) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
+    const result = streamText({
+      model: this.model, abortSignal: signal, maxRetries: 1,
+      system: withAgentRules(`${BOOK_STUDY_GUIDANCE}\n用清楚易懂的简体中文回应本轮要求，适量使用标题和列表。当前 library 是控制器确认后的状态，掌握和复习日期只能按它说明，不展示内部字段名或分数。不声称已经保存尚未成功提交的结果。每轮根据需要提出一个问题，纯查询/总结/不想练习时不用强行提问。`),
+      prompt: JSON.stringify({ ...input, state: undefined, library: input.state.bookStudy, history: input.state.messages.slice(-20) }),
+    });
+    let text = "";
+    for await (const part of result.fullStream) {
+      if (part.type === "error") throw part.error;
+      if (part.type === "text-delta") {
+        text += part.text;
+        await onDelta(part.text);
+      }
+    }
+    if (!text.trim()) throw new Error("读书回复未生成，请重试");
+    return text;
+  }
 
   async classifyTurn(input: TurnRoutingInput, signal?: AbortSignal): Promise<SemanticTurnCandidate> {
     return generateJson({

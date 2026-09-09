@@ -1,3 +1,4 @@
+import { applyBookTurn, summarizeBookStudy } from "./book-study.js";
 import { randomUUID } from "node:crypto";
 import type { ClientTutorCommand, LearningSupportInput, TeachingPolicy, DiagnosticCard, TopicModel, TurnResolution, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
@@ -25,7 +26,7 @@ type RunOptions = {
   teachingPolicy?: TeachingPolicy;
   learningSupport?: LearningSupportInput;
   diagnosticAnswers?: Record<string, string>;
-  sessionMode?: "teach" | "explain";
+  sessionMode?: "teach" | "explain" | "read";
   learningSessionId?: string;
   turnResolution?: TurnResolution;
   clientCommand?: ClientTutorCommand;
@@ -232,7 +233,7 @@ export class TutorOrchestrator {
       await emit({ type: "run.completed", runId });
       return;
     }
-    state.sessionMode ??= options.sessionMode === "explain" ? "explain" : "teach";
+    state.sessionMode ??= options.sessionMode === "read" ? "read" : options.sessionMode === "explain" ? "explain" : "teach";
 
     try {
       if (
@@ -298,6 +299,11 @@ export class TutorOrchestrator {
         }
       }
       state.messages.push({ role: "user", content: message });
+      if (state.sessionMode === "read") {
+        await this.runBookTurn(state, message, runId, emit, signal);
+        await emit({ type: "run.completed", runId });
+        return;
+      }
       let topicModel = state.topicModel ? ensureTopicModelDefaults(state.topicModel) : undefined;
 
       if (options.clientCommand?.type === "UPDATE_SUBJECT") {
@@ -543,6 +549,53 @@ export class TutorOrchestrator {
       await emit({ type: "run.failed", runId, message: messageText });
       throw error;
     }
+  }
+
+  private async runBookTurn(state: TutorState, message: string, runId: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
+    if (!this.modelClient?.planBookTurn || !this.modelClient.streamBookResponse) {
+      throw new Error("当前模型客户端未配置读书能力");
+    }
+    const timeout = AbortSignal.timeout(180_000);
+    const abortSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const now = new Date();
+    let material: string | undefined;
+    const sourceUrl = extractWeixinUrls(message)[0];
+    const shouldResearch = !state.bookStudy || /(?:换一本|换本书|读《|阅读《|查找资料|搜索资料)/u.test(message);
+    if (sourceUrl || shouldResearch) {
+      await emit({ type: "tutor.phase.changed", phase: "research", label: "正在查找阅读参考资料" });
+      try {
+        if (sourceUrl) {
+          const article = await this.fetchSource(sourceUrl);
+          material = `来源：${article.url}\n标题：${article.title}\n${article.markdown}`;
+        } else if (message.length < 1500) {
+          const result = await this.search(`${message} 书籍 作者 目录 核心观点`);
+          const text = typeof result === "string" ? result.trim() : JSON.stringify(result);
+          if (text && !text.startsWith("[web_search]") && text !== "没有找到相关结果") material = text;
+        }
+      } catch (error) {
+        if (abortSignal.aborted) throw error;
+        await emit({ type: "grounding.degraded", reason: "未取到参考资料，将依据你提供的内容阅读，缺失的原文会明确说明" });
+      }
+    }
+    await emit({ type: "tutor.phase.changed", phase: "teach", label: "正在梳理主线与阅读进度" });
+    const input = { message, state, material, now: now.toISOString() };
+    const turn = await this.modelClient.planBookTurn(input, abortSignal);
+    const nextState = { ...state, bookStudy: applyBookTurn(state.bookStudy, turn, message, now) };
+    const book = nextState.bookStudy.books[nextState.bookStudy.activeBook];
+    await emit({ type: "topic.model.ready", title: `读书 · ${book.bookTitle}`, topic: book.bookTitle, outcome: book.coreQuestion || book.goal });
+    const response = await this.modelClient.streamBookResponse({ ...input, state: nextState }, async (text) => {
+      if (abortSignal.aborted) throw new Error("请求已取消");
+      await emit({ type: "message.delta", text });
+    }, abortSignal);
+    // Commit the reading notebook and assistant reply together, only after a full response.
+    state.bookStudy = nextState.bookStudy;
+    state.topic = book.bookTitle;
+    state.lessonTitle = `读书 · ${book.bookTitle}`;
+    state.phase = "teach";
+    state.turnCount += 1;
+    state.messages.push({ role: "assistant", content: response });
+    await this.persist(state, runId, emit);
+    await emit({ type: "book.study.updated", reading: summarizeBookStudy(state.bookStudy, now) });
   }
 
   private applyStatePatch(state: TutorState, model: TopicModel, decision: TutorTurnDecision) {

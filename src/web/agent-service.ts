@@ -25,7 +25,7 @@ export interface WebAgentRunInput {
   diagnosticAnswers?: Record<string, string>;
   teachingPolicy?: TeachingPolicy;
   learningSupport?: LearningSupportInput;
-  sessionMode?: "teach" | "explain";
+  sessionMode?: "teach" | "explain" | "read";
   clientCommand?: ClientTutorCommand;
 }
 

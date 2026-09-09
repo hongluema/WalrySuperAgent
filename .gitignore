@@ -11,3 +11,5 @@ super-agent.config.json
 .tutor-data/
 .env-gpt-cheerful-sitor-intent-recognition
 super-agent.config-gpt-cheerful-sitor-intent-recognition.json
+.knowledge-data/*
+output/*

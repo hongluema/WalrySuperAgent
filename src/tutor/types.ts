@@ -430,12 +430,14 @@ export type TutorState = {
   teachingApproach?: TutorDiagnosis["teachingApproach"];
   knownIntuitions: Array<{ conceptId: string; reason: string; confidence: "high" | "medium" }>;
   nodeLearningStates: Record<string, NodeLearningState>;
-  sessionMode?: "teach" | "explain";
+  sessionMode?: "teach" | "explain" | "read";
+  bookStudy?: import("./book-study.js").BookStudyState;
   updatedAt: string;
   lastDecision?: TutorTurnDecision;
 };
 
 export type TutorEvent =
+  | { type: "book.study.updated"; reading: import("./book-study.js").BookStudySummary }
   | { type: "teaching.policy.selected"; policy: TeachingPolicy }
   | { type: "teaching.question.ready"; question?: TeachingQuestion }
   | { type: "run.started"; runId: string; conversationId: string; learningSessionId?: string }
