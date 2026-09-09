@@ -5,6 +5,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { WebAgentService } from "./agent-service.js";
 import { MACRO_DOMAINS } from "../tutor/domain/catalog.js";
+import { TutorStore } from "../tutor/store.js";
+import { summarizeBookStudy } from "../tutor/book-study.js";
 
 const runSchema = z.object({
   conversationId: z.string().trim().min(1).max(120),
@@ -36,6 +38,23 @@ const quickAskSchema = z.object({
 
 export const app = new Hono();
 const agent = new WebAgentService();
+const readingStore = new TutorStore();
+
+// Internal service endpoint; the Web BFF resolves ownership before forwarding.
+app.get("/api/v1/conversations/:id/reading", async (context) => {
+  const id = context.req.param("id");
+  if (!z.string().uuid().safeParse(id).success) return context.json({ error: { message: "课堂 ID 无效" } }, 400);
+  context.header("Cache-Control", "no-store");
+  const state = await readingStore.load(id);
+  if (state?.sessionMode !== "read" || !state.bookStudy) return context.json({ reading: null });
+  const book = state.bookStudy.books[state.bookStudy.activeBook];
+  return context.json({ reading: {
+    ...summarizeBookStudy(state.bookStudy, new Date()),
+    chapters: book.chapters,
+    notes: book.notes,
+    updatedAt: book.updatedAt,
+  } });
+});
 
 app.get("/health", (context) =>
   context.json({ status: "ok", service: "walry-web-agent" }),
