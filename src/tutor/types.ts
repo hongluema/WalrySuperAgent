@@ -438,6 +438,7 @@ export type TutorState = {
 
 export type TutorEvent =
   | { type: "book.study.updated"; reading: import("./book-study.js").BookStudySummary }
+  | { type: "book.study.choice.ready"; choice: import("./book-study.js").BookStudyChoice }
   | { type: "teaching.policy.selected"; policy: TeachingPolicy }
   | { type: "teaching.question.ready"; question?: TeachingQuestion }
   | { type: "run.started"; runId: string; conversationId: string; learningSessionId?: string }

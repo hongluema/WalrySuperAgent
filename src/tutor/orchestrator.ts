@@ -1,4 +1,4 @@
-import { applyBookTurn, summarizeBookStudy } from "./book-study.js";
+import { applyBookTurn, DEFAULT_BOOK_OPENING_CHOICE, summarizeBookStudy } from "./book-study.js";
 import { randomUUID } from "node:crypto";
 import type { ClientTutorCommand, LearningSupportInput, TeachingPolicy, DiagnosticCard, TopicModel, TurnResolution, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
 import { ensureTopicModelDefaults, isDirectHelpRequest, isSystematicLearningIntent, topicModelFromUnknownTopic } from "./topic-model.js";
@@ -580,10 +580,12 @@ export class TutorOrchestrator {
     await emit({ type: "tutor.phase.changed", phase: "teach", label: "正在梳理主线与阅读进度" });
     const input = { message, state, material, now: now.toISOString() };
     const turn = await this.modelClient.planBookTurn(input, abortSignal);
+    const choice = turn.choice ?? (!state.bookStudy && message.length < 500 ? DEFAULT_BOOK_OPENING_CHOICE : undefined);
     const nextState = { ...state, bookStudy: applyBookTurn(state.bookStudy, turn, message, now) };
     const book = nextState.bookStudy.books[nextState.bookStudy.activeBook];
     await emit({ type: "topic.model.ready", title: `读书 · ${book.bookTitle}`, topic: book.bookTitle, outcome: book.coreQuestion || book.goal });
-    const response = await this.modelClient.streamBookResponse({ ...input, state: nextState }, async (text) => {
+    if (choice) await emit({ type: "book.study.choice.ready", choice });
+    const response = await this.modelClient.streamBookResponse({ ...input, state: nextState, choice }, async (text) => {
       if (abortSignal.aborted) throw new Error("请求已取消");
       await emit({ type: "message.delta", text });
     }, abortSignal);
