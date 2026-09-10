@@ -1,3 +1,4 @@
+import { learnerMemoryService } from "./learner-memory-service.js";
 import "dotenv/config";
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, type ModelMessage } from "ai";
@@ -19,6 +20,7 @@ import { LocalTraceRecorder } from "../trace/recorder.js";
 import { AiTutorModelClient } from "../tutor/model-client.js";
 
 export interface WebAgentRunInput {
+  learnerId?: string;
   conversationId: string;
   learningSessionId?: string;
   message: string;
@@ -151,6 +153,12 @@ export class WebAgentService {
           emit,
           signal,
           {
+            loadLearnerContext: input.learnerId ? async (query, excludeSessionId) => {
+              const { memory } = learnerMemoryService();
+              const context = await memory.context(input.learnerId!, query, excludeSessionId);
+              if (context.summary && !await memory.recordUse(input.learnerId!, query, context)) return { summary: "", skillIds: [], evidenceIds: [] };
+              return context;
+            } : undefined,
             diagnosticAnswers: input.diagnosticAnswers,
             teachingPolicy: input.teachingPolicy,
             learningSupport: input.learningSupport,

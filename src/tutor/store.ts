@@ -1,3 +1,4 @@
+import { LearnerMemoryStore } from "./learner-memory/store.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -179,8 +180,9 @@ function parseStoredState(value: TutorState | string): TutorState {
 
 class PostgresTutorStore implements TutorStoreBackend {
   private schemaReady?: Promise<void>;
+  private readonly memory: LearnerMemoryStore;
 
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool) { this.memory = new LearnerMemoryStore(pool); }
 
   private legacyLearningSessionId(conversationId: string): string {
     const digest = createHash("sha256").update(conversationId).digest("hex").slice(0, 12);
@@ -281,10 +283,12 @@ class PostgresTutorStore implements TutorStoreBackend {
 
   async save(state: TutorState, event: unknown): Promise<void> {
     await this.ensureSchema();
+    await this.memory.ensureSchema();
     const normalized = this.normalize(state, state.conversationId);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await this.memory.lockConversation(client, normalized.conversationId);
       await this.upsertSession(client, normalized);
       await client.query(
         `INSERT INTO tutor_conversations (conversation_id, selected_learning_session_id, updated_at)
@@ -302,6 +306,7 @@ class PostgresTutorStore implements TutorStoreBackend {
          VALUES ($1, $2, $3::jsonb)`,
         [normalized.conversationId, normalized.learningSessionId, JSON.stringify(event)],
       );
+      await this.memory.project(client, normalized);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);

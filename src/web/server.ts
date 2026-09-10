@@ -1,3 +1,5 @@
+import { verifyInternalIdentity } from "./internal-auth.js";
+import { learnerMemoryService } from "./learner-memory-service.js";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { serve } from "@hono/node-server";
@@ -139,8 +141,10 @@ app.post("/api/v1/quick-ask", async (context) => {
 
 app.post("/api/v1/runs", async (context) => {
   let body: unknown;
+  let rawBody: string;
   try {
-    body = await context.req.json();
+    rawBody = await context.req.text();
+    body = JSON.parse(rawBody);
   } catch {
     return context.json(
       { error: { code: "INVALID_REQUEST", message: "请求体必须是 JSON" } },
@@ -154,6 +158,14 @@ app.post("/api/v1/runs", async (context) => {
       { error: { code: "INVALID_REQUEST", message: "conversationId 或 message 不合法" } },
       400,
     );
+  }
+
+  const userId = verifyInternalIdentity(context.req.raw.headers, "POST", "/api/v1/runs", rawBody);
+  if (process.env.WALRY_INTERNAL_SECRET && !userId) return context.json({ error: { message: "内部身份验证失败" } }, 401);
+  if (userId) {
+    const { pool } = learnerMemoryService();
+    const owned = await pool.query("SELECT 1 FROM cheerful_conversations WHERE walry_conversation_id = $1 AND user_id = $2", [parsed.data.conversationId, userId]);
+    if (!owned.rowCount) return context.json({ error: { message: "没有找到这堂课" } }, 404);
   }
 
   const encoder = new TextEncoder();
@@ -179,7 +191,7 @@ app.post("/api/v1/runs", async (context) => {
       };
 
       void agent
-        .run(parsed.data, context.req.raw.signal, send)
+        .run({ ...parsed.data, learnerId: userId }, context.req.raw.signal, send)
         .then((result) => {
           // TutorOrchestrator emits its own semantic terminal event. Generic
           // Agent Loop runs return a non-empty final message and need the
@@ -207,6 +219,41 @@ app.post("/api/v1/runs", async (context) => {
     },
   });
 });
+
+app.all("/api/v1/learning-memory", memoryEndpoint);
+app.post("/api/v1/learning-memory/backfill", memoryEndpoint);
+app.post("/api/v1/learning-memory/corrections", memoryEndpoint);
+
+async function memoryEndpoint(context: import("hono").Context) {
+  context.header("Cache-Control", "no-store");
+  const url = new URL(context.req.url);
+  const body = await context.req.text();
+  const userId = verifyInternalIdentity(context.req.raw.headers, context.req.method, `${url.pathname}${url.search}`, body);
+  if (!userId) return context.json({ error: { message: "内部身份验证失败" } }, 401);
+  try {
+    const { memory } = learnerMemoryService();
+    await memory.ensureSchema();
+    if (context.req.method === "GET") return context.json(await memory.get(userId));
+    if (context.req.method === "PATCH") {
+      const parsed = z.object({ enabled: z.boolean().optional(), teachingPreference: z.string().trim().max(600).optional() }).strict().safeParse(JSON.parse(body));
+      if (!parsed.success) return context.json({ error: { message: "记忆设置不合法" } }, 400);
+      await memory.updatePreferences(userId, parsed.data);
+    } else if (context.req.method === "DELETE") {
+      await memory.remove(userId, url.searchParams.get("itemId") ?? undefined);
+    } else if (url.pathname.endsWith("/backfill")) {
+      await memory.backfill(userId);
+    } else if (url.pathname.endsWith("/corrections")) {
+      const parsed = z.object({ itemId: z.string().min(1).max(200) }).strict().safeParse(JSON.parse(body));
+      if (!parsed.success) return context.json({ error: { message: "请选择要复核的记忆" } }, 400);
+      await memory.correct(userId, parsed.data.itemId);
+    } else return context.json({ error: { message: "不支持此操作" } }, 405);
+    return context.json(await memory.get(userId));
+  } catch (error) {
+    if (error instanceof SyntaxError) return context.json({ error: { message: "请求体必须是 JSON" } }, 400);
+    console.error("[learner-memory]", error);
+    return context.json({ error: { message: "学习记忆暂不可用，请稍后重试" } }, 503);
+  }
+}
 
 function isMainModule(): boolean {
   return process.argv[1]

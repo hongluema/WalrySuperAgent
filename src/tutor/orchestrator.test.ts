@@ -1373,3 +1373,33 @@ test("does not skip a core node from diagnostic multiple-choice answers", async 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("cross-course memory reaches planning and teaching but never becomes course evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "walry-memory-context-"));
+  const seen: string[] = [];
+  const client = fakeModelClient();
+  client.buildTopicModel = async (input) => { seen.push(input.learnerContext?.summary ?? "none"); return fakeTopicModel(); };
+  client.streamResponse = async (input, emit) => { seen.push(input.learnerContext?.summary ?? "none"); await emit("根据已有经验安排一个新任务"); return "根据已有经验安排一个新任务"; };
+  try {
+    const store = new TutorStore(root);
+    const tutor = new TutorOrchestrator(store, client, async () => "没有找到相关结果");
+    const queries: string[] = [];
+    await tutor.run("memory-context", "我想学习分布式锁", () => {}, undefined, {
+      sessionMode: "explain",
+      loadLearnerContext: async (query, excluded) => {
+        queries.push(query); assert.ok(excluded.startsWith("learn_"));
+        return { summary: "已在旧课独立解释行锁；新课仍需验证", skillIds: ["old-lock"], evidenceIds: ["old-answer"] };
+      },
+    });
+    assert.ok(queries.length >= 2, "read before topic and refine after topic creation");
+    assert.ok(seen.length >= 2 && seen.every((s) => s.includes("旧课独立解释行锁")));
+    const saved = (await store.load("memory-context"))!;
+    assert.equal(saved.roadmap.some((n) => n.status === "mastered"), false);
+    assert.equal(JSON.stringify(saved.nodeLearningStates).includes("old-answer"), false);
+    assert.equal(JSON.stringify(saved).includes("旧课独立解释行锁"), false, "cross-course context must not persist in course snapshot");
+    await tutor.run("memory-unavailable", "我想学习锁", () => {}, undefined, {
+      sessionMode: "explain", loadLearnerContext: async () => { throw new Error("test unavailable"); },
+    });
+    assert.ok(await store.load("memory-unavailable"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

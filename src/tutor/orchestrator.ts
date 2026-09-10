@@ -1,3 +1,4 @@
+import type { LearnerContext } from "./learner-memory/types.js";
 import { applyBookTurn, DEFAULT_BOOK_OPENING_CHOICE, summarizeBookStudy } from "./book-study.js";
 import { randomUUID } from "node:crypto";
 import type { ClientTutorCommand, LearningSupportInput, TeachingPolicy, DiagnosticCard, TopicModel, TurnResolution, TutorEvent, TutorState, TutorTurnDecision, VisibleReasoningTrace } from "./types.js";
@@ -23,6 +24,7 @@ const phaseLabels = {
 };
 
 type RunOptions = {
+  loadLearnerContext?: (query: string, excludeSessionId: string) => Promise<LearnerContext>;
   teachingPolicy?: TeachingPolicy;
   learningSupport?: LearningSupportInput;
   diagnosticAnswers?: Record<string, string>;
@@ -298,9 +300,15 @@ export class TutorOrchestrator {
           if (saved) saved.support = "hint";
         }
       }
+      const loadMemory = async (query: string): Promise<LearnerContext | undefined> => {
+        if (!options.loadLearnerContext) return undefined;
+        try { return await options.loadLearnerContext(query, state!.learningSessionId); }
+        catch (error) { console.warn("[Tutor] 学习记忆读取失败，继续常规教学", error instanceof Error ? error.message : "unavailable"); return undefined; }
+      };
+      let learnerContext = await loadMemory(`${state.topic ?? ""} ${message}`);
       state.messages.push({ role: "user", content: message });
       if (state.sessionMode === "read") {
-        await this.runBookTurn(state, message, runId, emit, signal);
+        await this.runBookTurn(state, message, runId, emit, signal, learnerContext);
         await emit({ type: "run.completed", runId });
         return;
       }
@@ -370,6 +378,7 @@ export class TutorOrchestrator {
           : (state.sessionMode === "explain" ? "未取到检索结果，正在组织讲解…" : "未取到检索结果，正在用已有知识生成主题模型和诊断题…"));
         topicModel = ensureTopicModelDefaults(await this.modelClient.buildTopicModel({
           userGoal,
+          learnerContext,
           history: state.messages,
           materials: researchMaterial ? [researchMaterial] : [],
           teachingPolicy: usesWebTeaching(state) ? WEB_TEACHING_POLICY : undefined,
@@ -390,6 +399,7 @@ export class TutorOrchestrator {
           };
           topicModel.evidenceSources = [];
         }
+        learnerContext = await loadMemory(`${topicModel.topic} ${topicModel.conceptRoute.map((node) => node.title).join(" ")}`);
         state.topicModel = topicModel;
         state.topic = topicModel.topic;
         state.lessonTitle = topicModel.lessonTitle;
@@ -421,7 +431,7 @@ export class TutorOrchestrator {
           this.applyStatePatch(state, topicModel, decision);
           if (state.sessionMode !== "explain") await emitRoadmap(state, emit);
           await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, decision, decision.thinking ?? "") });
-          const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
+          const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal, learnerContext);
           this.recordQuestion(state, topicModel, decision, responseText);
           await this.persist(state, runId, emit);
           await emit({ type: "run.completed", runId });
@@ -457,7 +467,7 @@ export class TutorOrchestrator {
         state.lastDecision = resolvedDecision;
         this.applyStatePatch(state, topicModel, resolvedDecision);
         await emit({ type: "reasoning.trace.ready", trace: makeTrace(state, resolvedDecision, resolvedDecision.thinking ?? "") });
-        const responseText = await this.streamResponse(state, topicModel, resolvedDecision, message, emit, signal);
+        const responseText = await this.streamResponse(state, topicModel, resolvedDecision, message, emit, signal, learnerContext);
         this.recordQuestion(state, topicModel, resolvedDecision, responseText);
         await this.persist(state, runId, emit);
         if (turnResolution.sessionCommand === "PAUSE") {
@@ -495,6 +505,7 @@ export class TutorOrchestrator {
           state,
           topicModel,
           answeredDiagnostics: answeredDiagnostics(state),
+          learnerContext,
         }, signal);
 
         const decision = buildFirstTeachingDecision(topicModel, diagnosis.summary, state.activeConcept);
@@ -516,7 +527,7 @@ export class TutorOrchestrator {
         const teachingTrace = makeTrace(state, decision, decision.thinking ?? "");
         await emitThinking(emit, teachingTrace.rawThinking);
         await emit({ type: "reasoning.trace.ready", trace: teachingTrace });
-        const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
+        const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal, learnerContext);
         this.recordQuestion(state, topicModel, decision, responseText);
         await this.persist(state, runId, emit);
         await emit({ type: "run.completed", runId });
@@ -540,7 +551,7 @@ export class TutorOrchestrator {
       );
       await emit({ type: "assessment.updated", score: progress.score, status: progress.status, ...(decision.webTeaching ? { feedback: decision.webTeaching.feedback } : {}) });
       if (state.sessionMode !== "explain") await emitRoadmap(state, emit);
-      const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal);
+      const responseText = await this.streamResponse(state, topicModel, decision, message, emit, signal, learnerContext);
       this.recordQuestion(state, topicModel, decision, responseText);
       await this.persist(state, runId, emit);
       await emit({ type: "run.completed", runId });
@@ -551,7 +562,7 @@ export class TutorOrchestrator {
     }
   }
 
-  private async runBookTurn(state: TutorState, message: string, runId: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal) {
+  private async runBookTurn(state: TutorState, message: string, runId: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal, learnerContext?: LearnerContext) {
     if (!this.modelClient?.planBookTurn || !this.modelClient.streamBookResponse) {
       throw new Error("当前模型客户端未配置读书能力");
     }
@@ -578,7 +589,7 @@ export class TutorOrchestrator {
       }
     }
     await emit({ type: "tutor.phase.changed", phase: "teach", label: "正在梳理主线与阅读进度" });
-    const input = { message, state, material, now: now.toISOString() };
+    const input = { message, state, material, learnerContext, now: now.toISOString() };
     const turn = await this.modelClient.planBookTurn(input, abortSignal);
     const choice = turn.choice ?? (!state.bookStudy && message.length < 500 ? DEFAULT_BOOK_OPENING_CHOICE : undefined);
     const nextState = { ...state, bookStudy: applyBookTurn(state.bookStudy, turn, message, now) };
@@ -704,12 +715,12 @@ export class TutorOrchestrator {
     if (usesWebTeaching(state)) recordWebQuestion(state, decision);
   }
 
-  private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal): Promise<string> {
+  private async streamResponse(state: TutorState, model: TopicModel, decision: TutorTurnDecision, message: string, emit: (event: TutorEvent) => Promise<void> | void, signal?: AbortSignal, learnerContext?: LearnerContext): Promise<string> {
     if (!this.modelClient) throw new Error("Tutor 模型客户端未配置");
     await emitThinking(emit, "正在组织回复…");
     let text = "";
     try {
-      await this.modelClient.streamResponse({ message, state, topicModel: model, decision }, async (delta) => {
+      await this.modelClient.streamResponse({ message, state, topicModel: model, decision, learnerContext }, async (delta) => {
         if (signal?.aborted) throw new Error("请求已取消");
         text += delta;
         await emit({ type: "message.delta", text: delta });
